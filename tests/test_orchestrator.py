@@ -30,7 +30,21 @@ def _initial_state(conversation_id: str = "c_1") -> GraphState:
         "tool_calls": [],
         "step": 0,
         "trace": [],
+        "next_hop": None,
     }
+
+
+def _route_classify_then(next_after_classify: str):
+    """route_fn is now consulted on every supervisor visit, including the very first one --
+    this mirrors what a real LLM supervisor (guided by _supervisor.md) decides each turn:
+    classify first if nothing is classified yet, then take the test's chosen next hop."""
+    def route_fn(state):
+        if state.get("extracted") is None:
+            return {"next": "triage_classifier"}
+        if state.get("decision") is not None:
+            return {"next": "end"}
+        return {"next": next_after_classify}
+    return route_fn
 
 
 VALID_CLASSIFICATION = {
@@ -46,6 +60,32 @@ VALID_FAQ_CLASSIFICATION = {
 
 # --- test 1: handoff routes to the right specialist in order, no KB for a live-incident ticket ---
 
+def test_direct_reply_never_enters_triage_classifier_for_a_non_ticket_message(tmp_path):
+    conn = _conn(tmp_path)
+    classify_calls = []
+
+    def classify_fn(state):
+        classify_calls.append(1)  # should never be called for this test
+        return VALID_CLASSIFICATION
+
+    def route_fn(state):
+        return {"next": "direct_reply",
+                "reply": "I'm a support ticket triage assistant -- I classify tickets, search FAQs, "
+                          "and decide whether to auto-respond, route, or escalate."}
+
+    graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, route_fn=route_fn)
+    state = _initial_state()
+    state["messages"] = [{"role": "customer", "content": "who are you, what can you do?"}]
+    result = graph.invoke(state, {"configurable": {"thread_id": "c_1"}})
+
+    assert classify_calls == []  # triage_classifier was never entered
+    assert "__interrupt__" not in result
+    assert result["decision"]["action"] == "auto_respond"
+    assert "triage assistant" in result["decision"]["draft_reply"]
+    assert result["messages"][-1]["role"] == "agent"
+    assert "triage assistant" in result["messages"][-1]["content"]
+
+
 def test_handoff_routes_in_order_and_skips_kb_for_live_incident(tmp_path):
     conn = _conn(tmp_path)
     calls = []
@@ -56,7 +96,9 @@ def test_handoff_routes_in_order_and_skips_kb_for_live_incident(tmp_path):
 
     def route_fn(state):
         calls.append("route")
-        return "action_decider"  # live incident, not FAQ-answerable -> skip kb_retriever
+        if state.get("extracted") is None:
+            return {"next": "triage_classifier"}
+        return {"next": "action_decider"}  # live incident, not FAQ-answerable -> skip kb_retriever
 
     def decide_fn(state):
         calls.append("decide")
@@ -67,7 +109,8 @@ def test_handoff_routes_in_order_and_skips_kb_for_live_incident(tmp_path):
     graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, decide_fn=decide_fn, route_fn=route_fn)
     result = graph.invoke(_initial_state(), {"configurable": {"thread_id": "c_1"}})
 
-    assert calls == ["classify", "route", "decide"]
+    # route_fn is consulted on turn 1 too now (deciding to classify at all), not just post-classification
+    assert calls == ["route", "classify", "route", "decide"]
     assert result["decision"]["action"] == "escalate_to_human"
     assert result["kb_results"] is None  # kb_retriever was never called
 
@@ -86,7 +129,7 @@ def test_side_effecting_tool_request_suspends_graph(tmp_path):
                 "pending_tool": {"tool_name": "issue_refund", "args": {"charge_ids": ["ch_1"], "amount_usd": 89.97}}}
 
     graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, decide_fn=decide_fn,
-                         route_fn=lambda state: "action_decider")
+                         route_fn=_route_classify_then("action_decider"))
     result = graph.invoke(_initial_state(), {"configurable": {"thread_id": "c_2"}})
 
     assert "__interrupt__" in result
@@ -104,7 +147,9 @@ def test_search_knowledge_base_never_suspends_the_graph(tmp_path):
                 "pending_tool": None}
 
     graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, decide_fn=decide_fn,
-                         route_fn=lambda state: "kb_retriever" if state.get("kb_results") is None else "action_decider")
+                         route_fn=lambda state: {"next": "triage_classifier"} if state.get("extracted") is None
+                         else {"next": "kb_retriever"} if state.get("kb_results") is None
+                         else {"next": "action_decider"})
     result = graph.invoke(_initial_state(), {"configurable": {"thread_id": "c_3"}})
 
     assert "__interrupt__" not in result
@@ -124,7 +169,7 @@ def _suspended_refund_graph(conn, thread_id):
                 "pending_tool": {"tool_name": "issue_refund", "args": {"charge_ids": ["ch_1"], "amount_usd": 89.97}}}
 
     graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, decide_fn=decide_fn,
-                         route_fn=lambda state: "action_decider")
+                         route_fn=_route_classify_then("action_decider"))
     graph.invoke(_initial_state(), {"configurable": {"thread_id": thread_id}})
     return graph
 
@@ -210,7 +255,7 @@ def test_malformed_decision_output_retries_once_then_falls_back(tmp_path):
         return {"action": "not_a_real_action", "rationale": "x", "confidence": 0.9}  # always invalid
 
     graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, decide_fn=decide_fn,
-                         route_fn=lambda state: "action_decider")
+                         route_fn=_route_classify_then("action_decider"))
     result = graph.invoke(_initial_state(), {"configurable": {"thread_id": "c_6"}})
 
     assert attempts["count"] == 2  # 1 initial try + exactly 1 retry, not more
@@ -233,7 +278,7 @@ def test_malformed_output_that_succeeds_on_retry_is_used(tmp_path):
                 "cited_kb_doc_ids": [], "draft_reply": None, "pending_tool": None}
 
     graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, decide_fn=decide_fn,
-                         route_fn=lambda state: "action_decider")
+                         route_fn=_route_classify_then("action_decider"))
     result = graph.invoke(_initial_state(), {"configurable": {"thread_id": "c_6b"}})
 
     assert attempts["count"] == 2
@@ -253,7 +298,7 @@ def test_low_confidence_blocks_auto_respond(tmp_path):
                 "cited_kb_doc_ids": ["faq_dark_mode"], "draft_reply": "here's the answer", "pending_tool": None}
 
     graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, decide_fn=decide_fn,
-                         route_fn=lambda state: "action_decider")
+                         route_fn=_route_classify_then("action_decider"))
     result = graph.invoke(_initial_state(), {"configurable": {"thread_id": "c_7"}})
 
     assert result["decision"]["action"] == "route_to_specialist"  # downgraded, not auto_respond
@@ -271,7 +316,7 @@ def test_max_steps_halts_an_oscillating_supervisor(tmp_path, monkeypatch):
 
     # never moves on to action_decider -- always sends it back to kb_retriever
     graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn,
-                         route_fn=lambda state: "kb_retriever")
+                         route_fn=lambda state: {"next": "kb_retriever"})
     result = graph.invoke(_initial_state(), {"configurable": {"thread_id": "c_8"}})
 
     assert "__interrupt__" not in result

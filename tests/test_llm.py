@@ -27,7 +27,8 @@ def test_underscore_prefixed_file_is_excluded_from_registry():
 
 def test_supervisor_prompt_loads_as_plain_text_not_a_registered_agent():
     text = get_supervisor_prompt(PROMPTS_DIR)
-    assert "handoff_to_agent" in text
+    assert "direct_reply" in text  # the routing option that lets it answer a non-ticket message itself
+    assert "triage_classifier" in text
     assert len(text) > 0
 
 

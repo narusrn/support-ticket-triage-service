@@ -40,6 +40,9 @@ class GraphState(TypedDict):
     tool_calls: Annotated[list[dict], operator.add]
     step: int
     trace: Annotated[list[dict], operator.add]
+    next_hop: Optional[str]  # set by supervisor() itself, read by the conditional edge -- route_fn's
+                              # decision (including an optional direct_reply) is computed inside the node,
+                              # since a conditional edge function can only return a string, not state updates
 
 
 # --- internal validation schemas (what a specialist's raw LLM output must match) ---
@@ -58,7 +61,10 @@ class RawDecision(BaseModel):
 
 
 class RouteDecision(BaseModel):
-    next: Literal["triage_classifier", "kb_retriever", "action_decider", "end"]
+    next: Literal["triage_classifier", "kb_retriever", "action_decider", "direct_reply", "end"]
+    reply: Optional[str] = Field(None, description="Only set when next='direct_reply' -- the answer to give "
+                                                     "directly, with no classification or decision pipeline "
+                                                     "run at all (e.g. 'who are you', 'what can you do').")
 
 
 class ApprovalDecision(BaseModel):
@@ -170,14 +176,16 @@ def _default_decide_fn(state: GraphState) -> dict:
     return result.model_dump()
 
 
-def _default_route_fn(state: GraphState) -> str:
+def _default_route_fn(state: GraphState) -> dict:
     llm = make_llm_client(settings.SUPERVISOR_MODEL).with_structured_output(RouteDecision)
     prompt = get_supervisor_prompt()
-    context = (f"extracted: {state.get('extracted')}\nkb_results: {state.get('kb_results')}\n"
+    thread = "\n".join(f"{m['role']}: {m['content']}" for m in state["messages"] if m["role"] != "history_summary")
+    context = (f"thread so far:\n{thread}\n\n"
+               f"extracted: {state.get('extracted')}\nkb_results: {state.get('kb_results')}\n"
                f"decision: {state.get('decision')}")
     result = call_with_retry(lambda: llm.invoke([{"role": "system", "content": prompt},
                                                   {"role": "user", "content": context}]))
-    return result.next
+    return result.model_dump()
 
 
 # --- graph factory ---
@@ -204,17 +212,53 @@ def build_graph(
         if trim_happened:
             updates["messages"] = trimmed  # messages is a plain field: this replaces, not appends
             trace_entries.append(_trace(step, "supervisor", "context_trimmed", payload={"new_length": len(trimmed)}))
+
+        if step >= settings.MAX_STEPS:
+            updates["next_hop"] = "force_escalate"
+            return updates
+
+        if state.get("decision") is not None:
+            # already fully decided this turn (e.g. resumed from await_tool_approval) -- nothing left to route
+            updates["next_hop"] = "end"
+            return updates
+
+        # the supervisor decides EVERY turn, including the very first one -- it is not forced into
+        # triage_classifier just because nothing is classified yet. A plain "who are you" should never
+        # get mis-classified as if it were a real ticket; route_fn (the LLM, guided by _supervisor.md)
+        # makes that call itself, same as it decides whether to skip kb_retriever for a live incident.
+        route_view = {**state, **updates}
+        raw = route_fn(route_view)
+        try:
+            routed = raw if isinstance(raw, RouteDecision) else RouteDecision.model_validate(raw)
+        except ValidationError:
+            # a routing failure is not a reason to give up on the ticket -- fall back to the one safe
+            # default: classify if not classified yet, otherwise hand off to the decider
+            routed = RouteDecision(next="triage_classifier" if state.get("extracted") is None else "action_decider")
+
+        updates["next_hop"] = routed.next
+        trace_entries.append(_trace(step, "supervisor", "handoff", payload={"to": routed.next}))
+
+        if routed.next == "direct_reply" and routed.reply:
+            updates["messages"] = updates.get("messages", state["messages"]) + [{"role": "agent", "content": routed.reply}]
+            trace_entries.append(_trace(step, "supervisor", "direct_reply", payload={"reply": routed.reply}))
+            # represented as a lightweight auto_respond, not a schema carve-out -- every ticket's
+            # decision has the same shape (Decision requires urgency/extracted/action/rationale),
+            # so a greeting or meta-question doesn't need a special-cased response contract
+            updates["decision"] = {
+                "urgency": "low",
+                "extracted": {"product_area": "general", "issue_type": "general_inquiry", "sentiment": "neutral",
+                              "language": "en", "confidence": 1.0, "rationale": "not a support ticket"},
+                "action": "auto_respond",
+                "draft_reply": routed.reply,
+                "rationale": "direct conversational reply -- not a ticket requiring triage",
+                "confidence": 1.0,
+                "cited_kb_doc_ids": [],
+            }
+
         return updates
 
     def _route_from_supervisor(state: GraphState) -> str:
-        if state["step"] >= settings.MAX_STEPS:
-            return "force_escalate"
-        if state.get("extracted") is None:
-            return "triage_classifier"
-        if state.get("decision") is not None:
-            return "end"
-        next_hop = route_fn(state)
-        return next_hop
+        return state["next_hop"]
 
     def call_triage_classifier(state: GraphState) -> dict:
         step = state["step"] + 1
@@ -356,6 +400,7 @@ def build_graph(
         "kb_retriever": "kb_retriever",
         "action_decider": "action_decider",
         "force_escalate": "force_escalate",
+        "direct_reply": END,  # reply was already appended to messages inside supervisor() itself
         "end": END,
     })
     graph.add_edge("triage_classifier", "supervisor")

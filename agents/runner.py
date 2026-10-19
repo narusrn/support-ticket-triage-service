@@ -70,7 +70,7 @@ class Runner:
             "messages": [{"role": "system", "content": get_supervisor_prompt()}]
                         + [{"role": m["role"], "content": m["content"]} for m in messages],
             "urgency": None, "extracted": None, "kb_results": None, "decision": None,
-            "pending_tool": None, "tool_calls": [], "step": 0, "trace": [],
+            "pending_tool": None, "tool_calls": [], "step": 0, "trace": [], "next_hop": None,
         }
         config = {"configurable": {"thread_id": conversation_id}}
         started = time.time()
