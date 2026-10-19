@@ -21,7 +21,7 @@ from langgraph.types import interrupt
 from pydantic import BaseModel, Field, ValidationError
 
 from agents import tools
-from agents.llm import call_with_retry, get_agents, get_supervisor_prompt, make_llm_client
+from agents.llm import LLMUnavailableError, call_with_retry, get_agents, get_supervisor_prompt, make_llm_client
 from api.schemas.decision import ExtractedInfo
 from config import settings
 from storage import db
@@ -89,19 +89,31 @@ def _trace(step: int, node: str, event_type: str, payload: Optional[dict] = None
 
 
 def _call_with_validation_retry(fn: Callable[[], dict], model_cls, *, max_retries: int = 1):
-    """Calls fn(), validates the result against model_cls. Retries once on a
-    validation failure; on the second failure, returns None so the caller can
-    fall back to escalate_to_human instead of crashing or guessing."""
-    last_result = None
+    """Calls fn(), validates the result against model_cls. Retries once on EITHER a
+    validation failure (malformed-but-present output) OR fn() raising at all (e.g.
+    LLMUnavailableError once call_with_retry's own budget is exhausted) -- either
+    way, the caller falls back to escalate_to_human instead of crashing or guessing.
+
+    Returns (validated_model_or_None, failure_reason_or_None) -- the reason lets the
+    caller set an accurate decision rationale ("schema_validation_failed" vs
+    "llm_unavailable") instead of a single hardcoded one regardless of what failed.
+    """
+    last_failure_reason = None
     for attempt in range(max_retries + 1):
-        raw = fn()
-        last_result = raw
         try:
-            return model_cls.model_validate(raw)
-        except ValidationError:
+            raw = fn()
+        except LLMUnavailableError:
+            last_failure_reason = "llm_unavailable"
             if attempt == max_retries:
-                return None
-    return None
+                return None, last_failure_reason
+            continue
+        try:
+            return model_cls.model_validate(raw), None
+        except ValidationError:
+            last_failure_reason = "schema_validation_failed"
+            if attempt == max_retries:
+                return None, last_failure_reason
+    return None, last_failure_reason
 
 
 # --- context engineering ---
@@ -158,7 +170,11 @@ def maybe_trim_messages(messages: list[dict], summarize_fn: Callable[[list[dict]
 # --- default (real LLM) brain functions -- used when build_graph() isn't given mocks ---
 
 def _default_classify_fn(state: GraphState) -> dict:
-    llm = make_llm_client(settings.OPENAI_MODEL).with_structured_output(RawClassification)
+    # method="function_calling": OpenAI's default strict JSON-schema mode rejects any
+    # free-form dict field (requires additionalProperties:false on every nested object,
+    # including ones we don't control the shape of, like ToolCall.args) -- function-calling
+    # mode doesn't have that restriction and is just as reliable for our schemas
+    llm = make_llm_client(settings.OPENAI_MODEL).with_structured_output(RawClassification, method="function_calling")
     prompt = get_agents()["triage_classifier"].prompt
     thread_text = "\n".join(f"{m['role']}: {m['content']}" for m in state["messages"] if m["role"] != "history_summary")
     result = call_with_retry(lambda: llm.invoke([{"role": "system", "content": prompt},
@@ -167,7 +183,7 @@ def _default_classify_fn(state: GraphState) -> dict:
 
 
 def _default_decide_fn(state: GraphState) -> dict:
-    llm = make_llm_client(settings.OPENAI_MODEL).with_structured_output(RawDecision)
+    llm = make_llm_client(settings.OPENAI_MODEL).with_structured_output(RawDecision, method="function_calling")
     prompt = get_agents()["action_decider"].prompt
     context = (f"extracted: {state.get('extracted')}\nkb_results: {state.get('kb_results')}\n"
                f"thread: {[m['content'] for m in state['messages'] if m['role'] != 'history_summary']}")
@@ -177,7 +193,7 @@ def _default_decide_fn(state: GraphState) -> dict:
 
 
 def _default_route_fn(state: GraphState) -> dict:
-    llm = make_llm_client(settings.SUPERVISOR_MODEL).with_structured_output(RouteDecision)
+    llm = make_llm_client(settings.SUPERVISOR_MODEL).with_structured_output(RouteDecision, method="function_calling")
     prompt = get_supervisor_prompt()
     thread = "\n".join(f"{m['role']}: {m['content']}" for m in state["messages"] if m["role"] != "history_summary")
     context = (f"thread so far:\n{thread}\n\n"
@@ -262,12 +278,12 @@ def build_graph(
 
     def call_triage_classifier(state: GraphState) -> dict:
         step = state["step"] + 1
-        validated = _call_with_validation_retry(lambda: classify_fn(state), RawClassification)
+        validated, failure_reason = _call_with_validation_retry(lambda: classify_fn(state), RawClassification)
         if validated is None:
             return {
                 "step": step,
-                "decision": _SCHEMA_FAILURE_DECISION,
-                "trace": [_trace(step, "call_triage_classifier", "schema_validation_failed")],
+                "decision": {**_SCHEMA_FAILURE_DECISION, "rationale": failure_reason},
+                "trace": [_trace(step, "call_triage_classifier", failure_reason)],
             }
         extracted = validated.model_dump(exclude={"urgency"})
         return {
@@ -291,12 +307,12 @@ def build_graph(
 
     def call_action_decider(state: GraphState) -> dict:
         step = state["step"] + 1
-        validated = _call_with_validation_retry(lambda: decide_fn(state), RawDecision)
+        validated, failure_reason = _call_with_validation_retry(lambda: decide_fn(state), RawDecision)
         if validated is None:
             return {
                 "step": step,
-                "decision": _SCHEMA_FAILURE_DECISION,
-                "trace": [_trace(step, "call_action_decider", "schema_validation_failed")],
+                "decision": {**_SCHEMA_FAILURE_DECISION, "rationale": failure_reason},
+                "trace": [_trace(step, "call_action_decider", failure_reason)],
             }
 
         decision = validated.model_dump(exclude={"pending_tool"})

@@ -243,6 +243,32 @@ def test_trimming_is_a_no_op_under_threshold():
 
 # --- test 6: malformed specialist output retries once, then falls back to escalate_to_human ---
 
+def test_decide_fn_raising_llm_unavailable_falls_back_instead_of_crashing(tmp_path):
+    """Found live against the real API: a classify_fn/decide_fn that raises (not just
+    returns malformed data -- e.g. LLMUnavailableError once call_with_retry's own
+    budget is exhausted) used to propagate straight out of ingest_ticket() uncaught,
+    instead of degrading to escalate_to_human like a schema-validation failure does."""
+    from agents.llm import LLMUnavailableError
+
+    conn = _conn(tmp_path)
+    attempts = {"count": 0}
+
+    def classify_fn(state):
+        return VALID_CLASSIFICATION
+
+    def decide_fn(state):
+        attempts["count"] += 1
+        raise LLMUnavailableError("simulated: retries exhausted")
+
+    graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, decide_fn=decide_fn,
+                         route_fn=_route_classify_then("action_decider"))
+    result = graph.invoke(_initial_state(), {"configurable": {"thread_id": "c_llm_down"}})
+
+    assert attempts["count"] == 2  # 1 initial try + exactly 1 retry
+    assert result["decision"]["action"] == "escalate_to_human"
+    assert result["decision"]["rationale"] == "llm_unavailable"
+
+
 def test_malformed_decision_output_retries_once_then_falls_back(tmp_path):
     conn = _conn(tmp_path)
     attempts = {"count": 0}
