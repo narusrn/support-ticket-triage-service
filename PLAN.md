@@ -632,6 +632,7 @@ openai>=2.45.0,<4.0.0
 aiosqlite==0.22.1
 httpx==0.28.1
 requests==2.34.2
+pyyaml==6.0.3
 pytest==8.4.2
 pytest-asyncio==1.4.0
 ```
