@@ -318,10 +318,22 @@ def build_graph(
         decision = dict(state["decision"] or {})
         decision["tool_calls"] = [tool_call_record]
 
+        if status == "executed":
+            outcome_text = f"[System] {tool['tool_name']} ({tool_call_id}) approved"
+        else:
+            outcome_text = f"[System] {tool['tool_name']} ({tool_call_id}) rejected"
+        if human_decision.reason:
+            outcome_text += f" ({human_decision.reason})"
+        outcome_text += f": {result}" if result is not None else " — not executed"
+        outcome_message = {"role": "agent", "content": outcome_text}
+
         return {
             "step": step,
             "decision": decision,
             "tool_calls": [tool_call_record],
+            # messages is a plain field -- must append explicitly, a bare [outcome_message]
+            # here would wipe out the rest of the thread instead of adding to it
+            "messages": state["messages"] + [outcome_message],
             "trace": [_trace(step, "await_tool_approval", "resumed", payload=tool_call_record)],
         }
 

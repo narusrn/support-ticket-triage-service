@@ -142,6 +142,23 @@ def test_resume_approve_executes_tool_exactly_once_and_reaches_end(tmp_path):
     assert result["decision"]["tool_calls"][0]["result"]["status"] == "succeeded"
 
 
+def test_resume_approve_appends_outcome_message_without_losing_prior_history(tmp_path):
+    conn = _conn(tmp_path)
+    graph = _suspended_refund_graph(conn, "c_4b")
+
+    before = graph.get_state({"configurable": {"thread_id": "c_4b"}}).values
+    original_message_count = len(before["messages"])
+
+    result = graph.invoke(Command(resume={"decision": "approve", "reason": "verified"}),
+                           {"configurable": {"thread_id": "c_4b"}})
+
+    # prior messages (system + customer thread) must still be there, not wiped out by the append
+    assert len(result["messages"]) == original_message_count + 1
+    assert result["messages"][:original_message_count] == before["messages"]
+    assert "approved" in result["messages"][-1]["content"]
+    assert result["messages"][-1]["role"] == "agent"
+
+
 def test_resume_reject_never_executes(tmp_path):
     conn = _conn(tmp_path)
     graph = _suspended_refund_graph(conn, "c_5")
