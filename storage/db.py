@@ -91,7 +91,12 @@ def _now() -> str:
 def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
     path = db_path or settings.DATABASE_PATH
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    # check_same_thread=False: LangGraph's ainvoke() runs sync node functions (e.g.
+    # await_tool_approval) in a worker-thread pool so it doesn't block the event loop --
+    # that thread is not the one that opened this connection. Access stays serialized
+    # (one node runs at a time within a single graph invocation), so this is safe here,
+    # not a concurrency free-for-all.
+    conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
