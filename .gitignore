@@ -1,0 +1,9 @@
+.env
+data/*.db
+memory/*.jsonl
+logs/
+__pycache__/
+*.pyc
+.venv/
+.venv_*/
+*.db
