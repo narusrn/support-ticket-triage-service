@@ -132,8 +132,11 @@ def _print_history(base_url: str, headers: dict, conversation_id: str) -> None:
 
 def main() -> None:
     # Windows consoles default to a legacy codepage that mangles non-ASCII (em dashes, Thai
-    # text like the labeled Thai outage ticket) even though the API returns valid UTF-8.
-    for stream in (sys.stdout, sys.stderr):
+    # text like the labeled Thai outage ticket) even though the API returns valid UTF-8 --
+    # stdin needs this too, or typing/pasting Thai into input() corrupts it before it ever
+    # reaches requests (seen live: a Thai follow-up question 422'd with "unable to parse
+    # raw data as a unicode string").
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
         try:
             stream.reconfigure(encoding="utf-8")
         except AttributeError:

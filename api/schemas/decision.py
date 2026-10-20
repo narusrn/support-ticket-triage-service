@@ -42,6 +42,10 @@ class TicketResponse(BaseModel):
                           "a tool_call needs POST .../approve or .../reject before anything executes."
     )
     decision: Decision
+    reply: Optional[str] = Field(
+        None, description="The agent's conversational reply text -- only set by "
+                           "POST .../messages (the advisory endpoint); absent elsewhere."
+    )
 
 
 class ConversationDetail(BaseModel):

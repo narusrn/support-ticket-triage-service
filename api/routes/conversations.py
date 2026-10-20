@@ -36,7 +36,8 @@ async def send_message(conversation_id: str, body: OperatorMessageRequest, reque
     _require_conversation(request.app.state.conn, conversation_id)
     runner = request.app.state.runner
     result = await runner.send_message(conversation_id, body.message)
-    return TicketResponse(conversation_id=result["conversation_id"], status=result["status"], decision=result["decision"])
+    return TicketResponse(conversation_id=result["conversation_id"], status=result["status"],
+                           decision=result["decision"], reply=result["reply"])
 
 
 @router.post(

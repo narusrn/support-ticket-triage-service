@@ -87,6 +87,10 @@ def test_full_lifecycle_ingest_message_approve_history(client):
     # POST .../messages -- advisory turn, conversation already has a decision
     msg_response = client.post(f"/api/v1/conversations/{conversation_id}/messages", json={"message": "why is this urgent?"})
     assert msg_response.status_code == 200
+    # found live: TicketResponse had no `reply` field, so FastAPI's response_model
+    # silently dropped the text Runner.send_message() put there -- must actually come
+    # back to the caller, not just land in storage.db
+    assert msg_response.json()["reply"]
 
     # POST .../approve
     approve_response = client.post(

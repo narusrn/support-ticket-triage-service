@@ -1,4 +1,9 @@
-from scripts.chat import parse_command, read_pasted_thread
+from scripts.chat import _print_decision, parse_command, read_pasted_thread
+
+_DECISION = {
+    "urgency": "critical", "action": "escalate_to_human", "confidence": 0.9,
+    "draft_reply": None, "tool_calls": [],
+}
 
 
 def test_plain_text_is_a_message():
@@ -36,3 +41,17 @@ def test_read_pasted_thread_stops_at_a_lone_dot():
 
 def test_read_pasted_thread_without_a_sentinel_consumes_everything():
     assert read_pasted_thread(["line one", "line two"]) == "line one\nline two"
+
+
+def test_print_decision_shows_the_agent_reply(capsys):
+    """Found live: an advisory POST .../messages response that actually carries a
+    `reply` (now that api/schemas/decision.py's TicketResponse has the field at all)
+    must get printed -- this was the whole point of typing a free-text consultation
+    question into the REPL instead of a ticket-filing command."""
+    _print_decision({"status": "completed", "decision": _DECISION, "reply": "It's critical because..."})
+    assert "agent: It's critical because..." in capsys.readouterr().out
+
+
+def test_print_decision_without_a_reply_prints_no_agent_line(capsys):
+    _print_decision({"status": "completed", "decision": _DECISION})
+    assert "agent:" not in capsys.readouterr().out
