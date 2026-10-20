@@ -186,6 +186,21 @@ async def test_graph_message_sync_survives_an_advisory_message_in_between(tmp_pa
     assert len(contents) == len(set((m["role"], m["content"]) for m in stored))
 
 
+async def test_approve_does_not_insert_a_duplicate_decision_row(tmp_path):
+    """_persist_run() runs again on the approve resume, but the resume doesn't change any
+    actual decision field (urgency/action/rationale/...) -- only the tool call's status.
+    Without the dedup check, this would silently double the decisions table on every
+    approve/reject."""
+    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_with_refund,
+                      route_fn=_route_to_action_decider)
+    ingested = await runner.ingest_ticket("c_dedup", MESSAGES, {})
+    tool_call_id = ingested["decision"]["tool_calls"][0]["tool_call_id"]
+
+    await runner.approve("c_dedup", tool_call_id, reason="verified in Stripe")
+
+    assert len(db.get_decisions(runner.conn, "c_dedup")) == 1
+
+
 async def test_run_row_persisted_with_matching_trace_event_count(tmp_path):
     runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_auto_respond,
                       route_fn=_route_to_action_decider)

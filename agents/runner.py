@@ -156,6 +156,19 @@ class Runner:
                 db.insert_message(self.conn, conversation_id, m["role"], m["content"])
                 existing.add(key)
 
+    _DECISION_FIELDS = ("urgency", "extracted", "action", "draft_reply", "rationale", "confidence", "cited_kb_doc_ids")
+
+    def _decision_unchanged(self, conversation_id: str, decision: dict) -> bool:
+        """_persist_run() runs once on ingest and again on every approve/reject resume --
+        but a resume never actually produces a NEW decision, only resolves a pending tool
+        call (the tool_calls key it adds isn't even a decisions-table column). Without this
+        check, resuming inserts a byte-for-byte duplicate decision row every time."""
+        existing = db.get_decisions(self.conn, conversation_id)
+        if not existing:
+            return False
+        last = existing[-1]
+        return all(last.get(f) == decision.get(f) for f in self._DECISION_FIELDS)
+
     def _persist_run(self, conversation_id: str, started_at: float, result_state: dict,
                       stopped_reason: str = "end") -> None:
         run_id = f"run_{uuid.uuid4().hex[:8]}"
@@ -169,7 +182,7 @@ class Runner:
                                    latency_ms=entry.get("latency_ms"), tokens=entry.get("tokens"))
 
         decision = result_state.get("decision")
-        if decision is not None:
+        if decision is not None and not self._decision_unchanged(conversation_id, decision):
             db.insert_decision(self.conn, conversation_id, decision)
 
         pending = [tc["tool_call_id"] for tc in db.get_tool_calls(self.conn, conversation_id)

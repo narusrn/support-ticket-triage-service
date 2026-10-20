@@ -110,9 +110,15 @@ def test_full_lifecycle_ingest_message_approve_history(client):
     body = history.json()
     assert body["status"] == "completed"
     assert len(body["messages"]) >= 1
-    assert len(body["decisions"]) >= 1
     assert body["tool_calls"][0]["status"] == "executed"
     assert body["usage"]["total_runs"] >= 2
+
+    # the approve resume didn't change any real decision field, so it must not have
+    # inserted a duplicate decisions row -- and the one decision that IS there should
+    # carry the real tool_calls, not a stray [] (the decisions table has no tool_calls
+    # column of its own; GET attaches the real data to the latest decision)
+    assert len(body["decisions"]) == 1
+    assert body["decisions"][-1]["tool_calls"][0]["status"] == "executed"
 
 
 def test_reject_tool_call(client, monkeypatch):

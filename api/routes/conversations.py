@@ -100,11 +100,18 @@ async def get_conversation(conversation_id: str, request: Request) -> Conversati
     conn = request.app.state.conn
     conv = _require_conversation(conn, conversation_id)
     usage = db.get_usage_summary(conn, conversation_id)
+    decisions = db.get_decisions(conn, conversation_id)
+    tool_calls = db.get_tool_calls(conn, conversation_id)
+    # the decisions table has no per-decision tool_calls column -- the real data lives only
+    # in the tool_calls table above. Attach it to the latest decision (same convention
+    # Runner._build_response() uses for the other endpoints) so it isn't just a stray [].
+    if decisions:
+        decisions[-1]["tool_calls"] = tool_calls
     return ConversationDetail(
         conversation_id=conversation_id,
         status=conv["status"],
         messages=db.get_messages(conn, conversation_id),
-        decisions=db.get_decisions(conn, conversation_id),
-        tool_calls=db.get_tool_calls(conn, conversation_id),
+        decisions=decisions,
+        tool_calls=tool_calls,
         usage=UsageSummary(**usage),
     )

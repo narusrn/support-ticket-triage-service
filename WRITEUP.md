@@ -135,13 +135,25 @@ with an honest `rationale`, not a crash:
   auth as out of scope, but added anyway on request, gated behind an empty-string
   default so it's a no-op unless `API_KEY` is actually set in `.env`.
 
-## 6. Known gap
+## 6. Fixed during review
 
-`GET /conversations/{id}` → `decisions[i].tool_calls` is always `[]`. The `decisions`
-table has no per-decision tool-call column; the real tool-call history lives only in
-the top-level `tool_calls` array on the same response. Not wrong, just a minor
-redundant-looking field — the fix would be a join or a denormalized column on
-`decisions`, not worth it for the data volumes here.
+Two related bugs in `GET /conversations/{id}`, caught while writing this doc and
+fixed before submitting:
+
+- **`decisions[i].tool_calls` was always `[]`.** The `decisions` table has no
+  per-decision tool-call column — the real tool-call history lives only in the
+  top-level `tool_calls` array. `Runner._build_response()` already patched this onto
+  the latest decision for every other endpoint; `GET /conversations/{id}` just never
+  did. Fixed by applying the same patch in `api/routes/conversations.py`.
+- **Approving or rejecting a tool call inserted a duplicate `decisions` row.**
+  `_persist_run()` ran again on every resume, and `decision is not None` was true
+  even though no decision field (urgency/action/rationale/...) actually changed —
+  only the tool call's status did. Fixed by skipping the insert when the new decision
+  is field-for-field identical to the last stored one (`Runner._decision_unchanged`).
+
+Both covered by new regression tests (`test_approve_does_not_insert_a_duplicate_decision_row`
+in `tests/test_runner.py`, extended assertions in `test_full_lifecycle_...` in
+`tests/test_api.py`) and verified live against the real agent.
 
 ## 7. If this were going to production
 
