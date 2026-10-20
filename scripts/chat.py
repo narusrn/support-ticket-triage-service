@@ -68,9 +68,11 @@ def _ingest_pasted_thread(base_url: str, headers: dict) -> str:
     if not content.strip():
         sys.exit("(empty paste, aborting)")
 
-    plan = ""
-    while plan not in ("free", "pro", "enterprise"):
-        plan = input("customer plan [free/pro/enterprise]: ").strip().lower()
+    # all optional -- just consulting about a pasted example shouldn't be gated behind
+    # answering every field; blank input falls back to a reasonable default instead of
+    # looping until the operator types something valid
+    plan_raw = input("customer plan [free/pro/enterprise, default free]: ").strip().lower()
+    plan = plan_raw if plan_raw in ("free", "pro", "enterprise") else "free"
     tenure_raw = input("tenure_months [0]: ").strip()
     prior_raw = input("prior_tickets [0]: ").strip()
 
