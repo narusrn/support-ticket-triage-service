@@ -40,10 +40,10 @@ def _route_classify_then(next_after_classify: str):
     classify first if nothing is classified yet, then take the test's chosen next hop."""
     def route_fn(state):
         if state.get("extracted") is None:
-            return {"next": "triage_classifier"}
+            return {"next": "triage_classifier", "reason": "new ticket, not classified yet"}
         if state.get("decision") is not None:
-            return {"next": "end"}
-        return {"next": next_after_classify}
+            return {"next": "end", "reason": "already decided"}
+        return {"next": next_after_classify, "reason": "test fixture choice"}
     return route_fn
 
 
@@ -76,11 +76,12 @@ def test_triage_classifier_appends_a_short_status_message(tmp_path):
     original_count = len(initial["messages"])
     result = graph.invoke(initial, {"configurable": {"thread_id": "c_status_msg"}})
 
-    # exactly one new message was added (the classifier's status line), prior history intact
-    assert len(result["messages"]) == original_count + 1
+    # prior history is intact; new messages (supervisor handoffs + the classifier's own
+    # status line) were appended after it, never replacing it
+    assert len(result["messages"]) > original_count
     assert result["messages"][:original_count] == initial["messages"]
 
-    status_msg = result["messages"][-1]
+    status_msg = next(m for m in result["messages"] if m["content"].startswith("[triage_classifier]"))
     assert status_msg["role"] == "agent"
     assert "urgency=critical" in status_msg["content"]
     assert "product_area=billing" in status_msg["content"]
@@ -97,7 +98,7 @@ def test_direct_reply_never_enters_triage_classifier_for_a_non_ticket_message(tm
         return VALID_CLASSIFICATION
 
     def route_fn(state):
-        return {"next": "direct_reply",
+        return {"next": "direct_reply", "reason": "not a ticket, just a greeting",
                 "reply": "I'm a support ticket triage assistant -- I classify tickets, search FAQs, "
                           "and decide whether to auto-respond, route, or escalate."}
 
@@ -114,6 +115,34 @@ def test_direct_reply_never_enters_triage_classifier_for_a_non_ticket_message(tm
     assert "triage assistant" in result["messages"][-1]["content"]
 
 
+def test_route_fn_cannot_skip_straight_to_action_decider_without_classifying(tmp_path):
+    """Found live against the real API: despite _supervisor.md saying classify first, the
+    model sometimes jumps straight to action_decider on a real ticket turn, leaving
+    extracted=None -- which would later break the Decision schema's required field.
+    The supervisor must override this regardless of what route_fn says."""
+    conn = _conn(tmp_path)
+    classify_calls = []
+
+    def classify_fn(state):
+        classify_calls.append(1)
+        return VALID_CLASSIFICATION
+
+    def decide_fn(state):
+        return {"action": "escalate_to_human", "rationale": "x", "confidence": 0.9,
+                "cited_kb_doc_ids": [], "draft_reply": None, "pending_tool": None}
+
+    def route_fn(state):
+        # misbehaving on purpose -- always wants to skip straight to the decider
+        return {"next": "action_decider", "reason": "trying to skip classification"}
+
+    graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, decide_fn=decide_fn, route_fn=route_fn)
+    result = graph.invoke(_initial_state(), {"configurable": {"thread_id": "c_skip_classify"}})
+
+    assert classify_calls == [1]  # triage_classifier WAS forced to run despite route_fn's request
+    assert result["decision"]["extracted"] is not None
+    assert result["extracted"] is not None
+
+
 def test_handoff_routes_in_order_and_skips_kb_for_live_incident(tmp_path):
     conn = _conn(tmp_path)
     calls = []
@@ -125,8 +154,8 @@ def test_handoff_routes_in_order_and_skips_kb_for_live_incident(tmp_path):
     def route_fn(state):
         calls.append("route")
         if state.get("extracted") is None:
-            return {"next": "triage_classifier"}
-        return {"next": "action_decider"}  # live incident, not FAQ-answerable -> skip kb_retriever
+            return {"next": "triage_classifier", "reason": "new ticket"}
+        return {"next": "action_decider", "reason": "live incident, not FAQ-answerable -> skip kb_retriever"}
 
     def decide_fn(state):
         calls.append("decide")
@@ -175,9 +204,9 @@ def test_search_knowledge_base_never_suspends_the_graph(tmp_path):
                 "pending_tool": None}
 
     graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, decide_fn=decide_fn,
-                         route_fn=lambda state: {"next": "triage_classifier"} if state.get("extracted") is None
-                         else {"next": "kb_retriever"} if state.get("kb_results") is None
-                         else {"next": "action_decider"})
+                         route_fn=lambda state: {"next": "triage_classifier", "reason": "new ticket"} if state.get("extracted") is None
+                         else {"next": "kb_retriever", "reason": "FAQ-answerable"} if state.get("kb_results") is None
+                         else {"next": "action_decider", "reason": "kb checked"})
     result = graph.invoke(_initial_state(), {"configurable": {"thread_id": "c_3"}})
 
     assert "__interrupt__" not in result
@@ -370,7 +399,7 @@ def test_max_steps_halts_an_oscillating_supervisor(tmp_path, monkeypatch):
 
     # never moves on to action_decider -- always sends it back to kb_retriever
     graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn,
-                         route_fn=lambda state: {"next": "kb_retriever"})
+                         route_fn=lambda state: {"next": "kb_retriever", "reason": "stuck on purpose, simulating an oscillating supervisor"})
     result = graph.invoke(_initial_state(), {"configurable": {"thread_id": "c_8"}})
 
     assert "__interrupt__" not in result

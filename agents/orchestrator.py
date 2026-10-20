@@ -62,6 +62,8 @@ class RawDecision(BaseModel):
 
 class RouteDecision(BaseModel):
     next: Literal["triage_classifier", "kb_retriever", "action_decider", "direct_reply", "end"]
+    reason: str = Field(..., description="One short phrase for why this hop was chosen, "
+                                          "e.g. 'live incident, not an FAQ question -- skipping kb_retriever'.")
     reply: Optional[str] = Field(None, description="Only set when next='direct_reply' -- the answer to give "
                                                      "directly, with no classification or decision pipeline "
                                                      "run at all (e.g. 'who are you', 'what can you do').")
@@ -249,10 +251,26 @@ def build_graph(
         except ValidationError:
             # a routing failure is not a reason to give up on the ticket -- fall back to the one safe
             # default: classify if not classified yet, otherwise hand off to the decider
-            routed = RouteDecision(next="triage_classifier" if state.get("extracted") is None else "action_decider")
+            routed = RouteDecision(next="triage_classifier" if state.get("extracted") is None else "action_decider",
+                                    reason="routing failure, falling back to the safe default")
+
+        # safety net, not just a prompt instruction: seen live against the real model --
+        # despite _supervisor.md saying classify first, the LLM sometimes jumps straight to
+        # action_decider on a real ticket, leaving extracted=None. action_decider would then
+        # produce a decision missing a REQUIRED Decision.extracted field, breaking the API
+        # contract. direct_reply is unaffected -- it is a different next_hop value and is the
+        # correct way to skip classification for a non-ticket message.
+        if routed.next == "action_decider" and state.get("extracted") is None:
+            routed = RouteDecision(next="triage_classifier",
+                                    reason=f"override: action_decider requires extracted, which isn't set yet "
+                                           f"(model wanted: {routed.reason})")
 
         updates["next_hop"] = routed.next
-        trace_entries.append(_trace(step, "supervisor", "handoff", payload={"to": routed.next}))
+        trace_entries.append(_trace(step, "supervisor", "handoff", payload={"to": routed.next, "reason": routed.reason}))
+
+        if routed.next in ("triage_classifier", "kb_retriever", "action_decider"):
+            handoff_msg = {"role": "agent", "content": f"[supervisor] routing to {routed.next} ({routed.reason})"}
+            updates["messages"] = updates.get("messages", state["messages"]) + [handoff_msg]
 
         if routed.next == "direct_reply" and routed.reply:
             updates["messages"] = updates.get("messages", state["messages"]) + [{"role": "agent", "content": routed.reply}]
@@ -339,12 +357,20 @@ def build_graph(
         }
         if validated.pending_tool and validated.pending_tool.get("tool_name") in tools.SIDE_EFFECTING_TOOL_IMPLS:
             updates["pending_tool"] = validated.pending_tool
+            # written here, not in await_tool_approval -- that node pauses mid-function at
+            # interrupt(), before it ever returns, so nothing it does before the pause is
+            # actually committed to state yet. This node DOES return before the pause happens,
+            # so this is the right place for anything that must be visible while suspended.
+            waiting_msg = {"role": "agent", "content": f"[action_decider] requesting {validated.pending_tool['tool_name']} "
+                                                        f"— awaiting human approval"}
+            updates["messages"] = state["messages"] + [waiting_msg]
         return updates
 
     def force_escalate(state: GraphState) -> dict:
         step = state["step"] + 1
         decision = {**_SCHEMA_FAILURE_DECISION, "rationale": "max_steps_exceeded"}
-        return {"step": step, "decision": decision,
+        msg = {"role": "agent", "content": "[System] loop guard triggered (MAX_STEPS exceeded) — escalating to a human"}
+        return {"step": step, "decision": decision, "messages": state["messages"] + [msg],
                 "trace": [_trace(step, "force_escalate", "loop_guard_triggered")]}
 
     def await_tool_approval(state: GraphState) -> dict:

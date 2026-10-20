@@ -29,10 +29,10 @@ def _decide_auto_respond(state):
 
 def _route_to_action_decider(state):
     if state.get("extracted") is None:
-        return {"next": "triage_classifier"}
+        return {"next": "triage_classifier", "reason": "new ticket"}
     if state.get("decision") is not None:
-        return {"next": "end"}
-    return {"next": "action_decider"}
+        return {"next": "end", "reason": "already decided"}
+    return {"next": "action_decider", "reason": "test fixture"}
 
 
 def _runner(tmp_path, **brain_fns) -> Runner:
