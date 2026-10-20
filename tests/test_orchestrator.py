@@ -60,6 +60,34 @@ VALID_FAQ_CLASSIFICATION = {
 
 # --- test 1: handoff routes to the right specialist in order, no KB for a live-incident ticket ---
 
+def test_triage_classifier_appends_a_short_status_message(tmp_path):
+    conn = _conn(tmp_path)
+
+    def classify_fn(state):
+        return VALID_CLASSIFICATION  # urgency=critical, product_area=billing, issue_type=duplicate_charge
+
+    def decide_fn(state):
+        return {"action": "escalate_to_human", "rationale": "x", "confidence": 0.9,
+                "cited_kb_doc_ids": [], "draft_reply": None, "pending_tool": None}
+
+    graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, decide_fn=decide_fn,
+                         route_fn=_route_classify_then("action_decider"))
+    initial = _initial_state()
+    original_count = len(initial["messages"])
+    result = graph.invoke(initial, {"configurable": {"thread_id": "c_status_msg"}})
+
+    # exactly one new message was added (the classifier's status line), prior history intact
+    assert len(result["messages"]) == original_count + 1
+    assert result["messages"][:original_count] == initial["messages"]
+
+    status_msg = result["messages"][-1]
+    assert status_msg["role"] == "agent"
+    assert "urgency=critical" in status_msg["content"]
+    assert "product_area=billing" in status_msg["content"]
+    # brief by design -- the full rationale text must NOT be in this short status line
+    assert VALID_CLASSIFICATION["rationale"] not in status_msg["content"]
+
+
 def test_direct_reply_never_enters_triage_classifier_for_a_non_ticket_message(tmp_path):
     conn = _conn(tmp_path)
     classify_calls = []

@@ -286,10 +286,18 @@ def build_graph(
                 "trace": [_trace(step, "call_triage_classifier", failure_reason)],
             }
         extracted = validated.model_dump(exclude={"urgency"})
+        # a short status message, not the full rationale -- kept deliberately brief so it
+        # doesn't bloat every subsequent LLM call's context the way the full reasoning would
+        status_message = {
+            "role": "agent",
+            "content": f"[triage_classifier] urgency={validated.urgency}, product_area={extracted['product_area']}, "
+                       f"issue_type={extracted['issue_type']}, confidence={extracted['confidence']}",
+        }
         return {
             "step": step,
             "extracted": extracted,
             "urgency": validated.urgency,
+            "messages": state["messages"] + [status_message],
             "trace": [_trace(step, "call_triage_classifier", "decision",
                               payload={"urgency": validated.urgency, **extracted})],
         }
