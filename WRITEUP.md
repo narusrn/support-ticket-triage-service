@@ -158,6 +158,18 @@ Both covered by new regression tests (`test_approve_does_not_insert_a_duplicate_
 in `tests/test_runner.py`, extended assertions in `test_full_lifecycle_...` in
 `tests/test_api.py`) and verified live against the real agent.
 
+A third, separate bug: **advisory follow-ups (`POST .../messages`) had no memory of
+earlier advisory turns in the same conversation.** The endpoint deliberately never
+touches the graph's checkpoint (it can't approve/reject/execute anything, so it was
+built to just read the current decision and answer -- see PLAN.md "Resuming"), but
+that meant each consult question only ever saw the ticket's original decision, never
+any prior question-and-answer in the same conversation. Fixed by rebuilding the
+advisory prompt from `storage.db`'s stored message history (which already recorded
+every prior turn, it just was never read back) each time, filtering out the graph's
+internal `"[node] ..."` narration lines so only real conversational turns count.
+Verified live: a follow-up that only made sense in light of an earlier answer ("multiply
+that price by 12") was answered correctly without the number being restated.
+
 ## 7. If this were going to production
 
 - Swap the static `MODEL_PRICES_USD_PER_1K` table for live usage from the OpenAI
