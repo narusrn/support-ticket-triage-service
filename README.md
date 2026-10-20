@@ -59,6 +59,20 @@ Then pull the full audit trail:
 curl http://127.0.0.1:8000/api/v1/conversations/{conversation_id}
 ```
 
+## Terminal client
+
+`scripts/chat.py` is a thin REPL over the same endpoints above -- convenient for
+poking at a running server without typing curl by hand.
+
+```bash
+python scripts/chat.py --ticket eval/labeled_tickets.json --ticket-id ticket_1_billing
+python scripts/chat.py --conversation-id c_abc12345   # resume an existing conversation
+```
+
+In the REPL: plain text sends an operator follow-up, `/approve <tool_call_id> [reason]`
+and `/reject <tool_call_id> [reason]` resolve a pending tool call, `/history` prints
+the full audit trail, `/quit` exits. Pass `--api-key` if `API_KEY` is set in `.env`.
+
 ## Test
 
 ```bash

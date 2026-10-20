@@ -125,12 +125,15 @@ with an honest `rationale`, not a crash:
     `direct_reply` decision that never cites any KB doc — fixed by only judging
     `auto_respond` decisions that actually cite something.
 
-## 5. What was cut
+## 5. Scope decisions
 
-- **`scripts/chat.py`** (a terminal client) — skipped. Swagger (`/api/v1/docs`) plus
-  curl already covers manual exercising of every endpoint, and the pytest suite
-  covers automated verification; a bespoke REPL would have been pure duplication
-  of coverage that already exists elsewhere.
+- **`scripts/chat.py`** (terminal client) — initially deferred (Swagger + curl
+  already covered manual exercising of every endpoint), then built on request. It's
+  a thin REPL over the same 5 endpoints — no logic the API doesn't already have,
+  just command parsing (`/approve <id> [reason]`, `/reject <id> [reason]`,
+  `/history`, plain text) turned into the exact HTTP call an operator would
+  otherwise curl. Verified live against the real agent on both the billing and the
+  Thai outage tickets, including a full approve round-trip.
 - **API key auth** (`X-API-Key`) — the opposite direction: the spec explicitly lists
   auth as out of scope, but added anyway on request, gated behind an empty-string
   default so it's a no-op unless `API_KEY` is actually set in `.env`.
