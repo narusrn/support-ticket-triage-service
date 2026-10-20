@@ -34,6 +34,7 @@ def _mock_decide_auto_respond(state):
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "DATABASE_PATH", str(tmp_path / "test.db"))
     monkeypatch.setattr(settings, "LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(settings, "API_KEY", "")  # auth disabled for the tests that aren't about auth itself
     monkeypatch.setattr(orchestrator_module, "_default_classify_fn", lambda state: VALID_CLASSIFICATION)
     monkeypatch.setattr(orchestrator_module, "_default_route_fn", _mock_route_fn)
     monkeypatch.setattr(orchestrator_module, "_default_decide_fn", _mock_decide_with_refund)
@@ -152,6 +153,7 @@ def test_ticket_with_no_pending_tool_completes_immediately(tmp_path, monkeypatch
     # on the already-built graph.
     monkeypatch.setattr(settings, "DATABASE_PATH", str(tmp_path / "test2.db"))
     monkeypatch.setattr(settings, "LOG_DIR", str(tmp_path / "logs2"))
+    monkeypatch.setattr(settings, "API_KEY", "")
     monkeypatch.setattr(orchestrator_module, "_default_classify_fn", lambda state: VALID_CLASSIFICATION)
     monkeypatch.setattr(orchestrator_module, "_default_route_fn", _mock_route_fn)
     monkeypatch.setattr(orchestrator_module, "_default_decide_fn", _mock_decide_auto_respond)
@@ -166,3 +168,46 @@ def test_ticket_with_no_pending_tool_completes_immediately(tmp_path, monkeypatch
     body = response.json()
     assert body["status"] == "completed"
     assert body["decision"]["tool_calls"] == []
+
+
+# --- auth: these build their own client with API_KEY actually set, unlike the shared fixture ---
+
+@pytest.fixture
+def secured_client(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "DATABASE_PATH", str(tmp_path / "secured.db"))
+    monkeypatch.setattr(settings, "LOG_DIR", str(tmp_path / "logs3"))
+    monkeypatch.setattr(settings, "API_KEY", "test-secret-key")
+    monkeypatch.setattr(orchestrator_module, "_default_classify_fn", lambda state: VALID_CLASSIFICATION)
+    monkeypatch.setattr(orchestrator_module, "_default_route_fn", _mock_route_fn)
+    monkeypatch.setattr(orchestrator_module, "_default_decide_fn", _mock_decide_auto_respond)
+
+    from api.main import app
+    with TestClient(app) as c:
+        yield c
+
+
+def _ticket_body():
+    return {"messages": [{"role": "customer", "content": "Do you support dark mode?"}],
+            "customer_metadata": {"plan": "pro", "tenure_months": 5}}
+
+
+def test_request_without_api_key_is_rejected(secured_client):
+    response = secured_client.post("/api/v1/tickets", json=_ticket_body())
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "unauthorized"
+
+
+def test_request_with_wrong_api_key_is_rejected(secured_client):
+    response = secured_client.post("/api/v1/tickets", json=_ticket_body(), headers={"X-API-Key": "wrong-key"})
+    assert response.status_code == 401
+
+
+def test_request_with_correct_api_key_succeeds(secured_client):
+    response = secured_client.post("/api/v1/tickets", json=_ticket_body(), headers={"X-API-Key": "test-secret-key"})
+    assert response.status_code == 201
+
+
+def test_health_check_does_not_require_api_key(secured_client):
+    # infra/monitoring checks shouldn't need a key
+    response = secured_client.get("/health")
+    assert response.status_code == 200

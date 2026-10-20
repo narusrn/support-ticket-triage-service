@@ -9,6 +9,11 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-4o-mini"
     SUPERVISOR_MODEL: str = "gpt-4o-mini"
 
+    # API auth -- a single shared key via the X-API-Key header, not a user/account system.
+    # Beyond the spec's minimum (it explicitly excludes auth), added on request. Empty = auth
+    # disabled (dev convenience); set a real value to actually require the header.
+    API_KEY: str = ""
+
     # Persistence
     DATABASE_PATH: str = "./data/app.db"
 

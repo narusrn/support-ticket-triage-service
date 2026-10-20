@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -9,6 +9,7 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from agents.runner import Runner
 from api.routes import conversations, tickets
 from api.schemas.api import ErrorDetail, ErrorResponse
+from api.security import verify_api_key
 from config import settings
 from logging_conf import configure_logging
 from storage import db
@@ -75,5 +76,7 @@ async def health():
     return JSONResponse(status_code=200 if healthy else 503, content={"status": "ok" if healthy else "degraded", "checks": checks})
 
 
-app.include_router(tickets.router, prefix="/api/v1", tags=["tickets"])
-app.include_router(conversations.router, prefix="/api/v1", tags=["conversations"])
+# /health stays open (infra/monitoring checks shouldn't need a key); every real endpoint
+# under /api/v1 requires X-API-Key, enforced once here rather than per-route.
+app.include_router(tickets.router, prefix="/api/v1", tags=["tickets"], dependencies=[Depends(verify_api_key)])
+app.include_router(conversations.router, prefix="/api/v1", tags=["conversations"], dependencies=[Depends(verify_api_key)])
