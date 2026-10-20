@@ -62,8 +62,11 @@ def _input_lines(prompt: str = ""):
 
 
 def _ingest_pasted_thread(base_url: str, headers: dict) -> str:
-    print("Paste the ticket thread below -- whatever was copied, any format. "
-          "Type or paste it, then a single '.' on its own line, then Enter, when done:")
+    # doesn't have to be a formal ticket -- a plain question ("hi, who are you?") gets
+    # answered directly by the agent (action=auto_respond) without forcing classification,
+    # same as any other new conversation. This is just the one entry point for starting one.
+    print("Type or paste whatever you want to ask or report below -- a real ticket thread, "
+          "or just a question. A single '.' on its own line, then Enter, ends it:")
     content = read_pasted_thread(_input_lines("paste> "))
     if not content.strip():
         sys.exit("(empty paste, aborting)")
