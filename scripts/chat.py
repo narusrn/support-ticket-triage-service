@@ -53,18 +53,18 @@ def read_pasted_thread(line_source) -> str:
     return "\n".join(lines)
 
 
-def _input_lines():
+def _input_lines(prompt: str = ""):
     while True:
         try:
-            yield input()
+            yield input(prompt)
         except EOFError:
             return
 
 
 def _ingest_pasted_thread(base_url: str, headers: dict) -> str:
     print("Paste the ticket thread below -- whatever was copied, any format. "
-          "Type a single '.' on its own line when done:")
-    content = read_pasted_thread(_input_lines())
+          "Type or paste it, then a single '.' on its own line, then Enter, when done:")
+    content = read_pasted_thread(_input_lines("paste> "))
     if not content.strip():
         sys.exit("(empty paste, aborting)")
 
