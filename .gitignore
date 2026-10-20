@@ -6,6 +6,7 @@ __pycache__/
 *.pyc
 .venv/
 .venv_*/
+.vscode/
 *.db
 *.db-shm
 *.db-wal
