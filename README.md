@@ -66,8 +66,13 @@ poking at a running server without typing curl by hand.
 
 ```bash
 python scripts/chat.py --ticket eval/labeled_tickets.json --ticket-id ticket_1_billing
-python scripts/chat.py --conversation-id c_abc12345   # resume an existing conversation
+python scripts/chat.py --paste                        # paste a raw ticket thread interactively
+python scripts/chat.py --conversation-id c_abc12345    # resume an existing conversation
 ```
+
+`--paste` is for the "someone just copy-pasted a ticket thread as plain text" case --
+type or paste any number of lines, then a single `.` on its own line to finish, and
+it'll ask for the customer's plan/tenure/prior-tickets before ingesting.
 
 In the REPL: plain text sends an operator follow-up, `/approve <tool_call_id> [reason]`
 and `/reject <tool_call_id> [reason]` resolve a pending tool call, `/history` prints
