@@ -135,10 +135,33 @@ class Runner:
         response["replayed"] = False
         return response
 
+    def _sync_graph_messages(self, conversation_id: str, result_state: dict) -> None:
+        """Copies any new entries from the graph's own state["messages"] (the supervisor's
+        handoff/status/outcome lines) into storage.db's messages table, so GET
+        /conversations/{id} shows the full conversation, not just the raw customer thread.
+
+        Content-based dedup, not count-based: send_message()'s advisory path inserts
+        operator/agent messages straight into the DB without ever touching the graph, so
+        db.get_messages()'s row count can run ahead of what's reflected in state["messages"].
+        Comparing (role, content) pairs instead of lengths stays correct regardless of which
+        path added which message, and is cheap at this scale (a handful of messages per
+        conversation). The system prompt / metadata line are skipped -- internal setup
+        context, not part of the conversation.
+        """
+        graph_messages = [m for m in result_state.get("messages", []) if m["role"] != "system"]
+        existing = {(m["role"], m["content"]) for m in db.get_messages(self.conn, conversation_id)}
+        for m in graph_messages:
+            key = (m["role"], m["content"])
+            if key not in existing:
+                db.insert_message(self.conn, conversation_id, m["role"], m["content"])
+                existing.add(key)
+
     def _persist_run(self, conversation_id: str, started_at: float, result_state: dict,
                       stopped_reason: str = "end") -> None:
         run_id = f"run_{uuid.uuid4().hex[:8]}"
         finished_at = time.time()
+
+        self._sync_graph_messages(conversation_id, result_state)
 
         for entry in result_state.get("trace", []):
             db.insert_trace_event(self.conn, run_id, conversation_id, entry["step_index"], entry["node"],

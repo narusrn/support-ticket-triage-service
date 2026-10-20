@@ -77,7 +77,10 @@ async def test_ingest_ticket_persists_conversation_messages_and_decision(tmp_pat
     assert result["decision"]["tool_calls"][0]["status"] == "pending_approval"
 
     stored_messages = db.get_messages(runner.conn, "c_1")
-    assert len(stored_messages) == 2
+    # 2 original customer messages + the graph's own handoff/status narrative, now synced
+    assert [m["content"] for m in stored_messages[:2]] == [m["content"] for m in MESSAGES]
+    assert any(m["content"].startswith("[triage_classifier]") for m in stored_messages)
+    assert any(m["content"].startswith("[action_decider]") for m in stored_messages)
     stored_conv = db.get_conversation(runner.conn, "c_1")
     assert stored_conv["status"] == "awaiting_approval"
 
@@ -160,6 +163,27 @@ async def test_send_message_on_decided_conversation_uses_advisory_path(tmp_path)
     assert stored_messages[-2]["role"] == "operator"
     assert stored_messages[-2]["content"] == "Hi, thanks!"
     assert stored_messages[-1]["role"] == "agent"
+
+
+async def test_graph_message_sync_survives_an_advisory_message_in_between(tmp_path):
+    """The tricky ordering case: send_message()'s advisory path inserts messages straight
+    into storage.db without ever touching the graph. If syncing were count-based instead of
+    content-based, this advisory insert would throw off the count and the later approval's
+    outcome message could get silently skipped."""
+    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_with_refund,
+                      route_fn=_route_to_action_decider)
+    ingested = await runner.ingest_ticket("c_order", MESSAGES, {})
+    tool_call_id = ingested["decision"]["tool_calls"][0]["tool_call_id"]
+
+    await runner.send_message("c_order", "why is this urgent?")  # advisory -- 2 direct DB inserts, graph untouched
+    await runner.approve("c_order", tool_call_id, reason="verified")
+
+    stored = db.get_messages(runner.conn, "c_order")
+    contents = [m["content"] for m in stored]
+    assert "why is this urgent?" in contents  # the advisory operator turn
+    assert any(c.startswith("[System]") and "approved" in c for c in contents)  # the outcome message, not skipped
+    # no duplicates -- every (role, content) pair appears exactly once
+    assert len(contents) == len(set((m["role"], m["content"]) for m in stored))
 
 
 async def test_run_row_persisted_with_matching_trace_event_count(tmp_path):
