@@ -78,6 +78,14 @@ In the REPL: plain text sends an operator follow-up, `/approve <tool_call_id> [r
 and `/reject <tool_call_id> [reason]` resolve a pending tool call, `/history` prints
 the full audit trail, `/quit` exits. Pass `--api-key` if `API_KEY` is set in `.env`.
 
+`scripts/chatbot.py` is the same client, styled with `rich` -- colored urgency/status
+badges, panels for the agent's replies, tables for tool calls and history, same flags
+and commands as `chat.py` above:
+
+```bash
+python scripts/chatbot.py --ticket eval/labeled_tickets.json --ticket-id ticket_2_outage_th
+```
+
 ## Test
 
 ```bash
