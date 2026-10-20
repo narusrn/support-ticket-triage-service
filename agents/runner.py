@@ -24,21 +24,42 @@ def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
 
-def _default_advisory_reply(state: dict, message_text: str) -> str:
-    """Used for a follow-up turn on an already-decided conversation -- never
-    invokes the graph, just reads the current state and answers. Cannot
-    approve/reject/execute anything regardless of what the operator asks;
-    only the /approve and /reject endpoints can do that."""
+def _is_narration(message: dict) -> bool:
+    """Internal audit lines the graph appends (handoffs, status, tool outcomes) all
+    follow the "[node] ..." convention -- not something the model actually said in
+    conversation, so they're excluded when rebuilding advisory chat history below."""
+    return message["role"] == "agent" and message["content"].startswith("[")
+
+
+def _default_advisory_reply(state: dict, history: list[dict], message_text: str) -> str:
+    """Used for a follow-up turn on an already-decided conversation -- never invokes
+    the graph, just reads the current state and answers. Cannot approve/reject/execute
+    anything regardless of what the operator asks; only /approve and /reject can do
+    that.
+
+    Found live: this never remembered its OWN prior advisory turns, because they were
+    never written back into the graph's checkpoint -- a second consult question had no
+    idea what the first one had just been told, even within the same conversation.
+    `history` (storage.db's messages for this conversation, which already includes
+    every prior advisory turn) fixes that without needing to touch the checkpoint at
+    all -- the thing this endpoint was specifically designed never to do."""
     client = make_llm_client(settings.OPENAI_MODEL)
     context = f"Current decision: {state.get('decision')}\nPending tool (if any): {state.get('pending_tool')}"
-    response = call_with_retry(lambda: client.invoke([
+    conversation = [
         {"role": "system", "content": "You are a support triage assistant discussing an already-triaged "
                                        "ticket with an operator. Answer their question using the context "
                                        "below. You cannot approve, reject, or execute any tool call from "
                                        "this conversation -- only the dedicated approve/reject endpoints can."},
         {"role": "system", "content": context},
-        {"role": "user", "content": message_text},
-    ]))
+    ]
+    for m in history:
+        if _is_narration(m):
+            continue
+        role = "assistant" if m["role"] == "agent" else "user"
+        conversation.append({"role": role, "content": m["content"]})
+    conversation.append({"role": "user", "content": message_text})
+
+    response = call_with_retry(lambda: client.invoke(conversation))
     return response.content
 
 
@@ -51,7 +72,7 @@ class Runner:
         decide_fn: Optional[Callable] = None,
         route_fn: Optional[Callable] = None,
         summarize_fn: Optional[Callable] = None,
-        advisory_fn: Callable[[dict, str], str] = _default_advisory_reply,
+        advisory_fn: Callable[[dict, list[dict], str], str] = _default_advisory_reply,
     ):
         self.conn = conn
         self.graph = build_graph(conn, checkpointer, classify_fn=classify_fn, decide_fn=decide_fn,
@@ -89,6 +110,11 @@ class Runner:
         return self._build_response(conversation_id)
 
     async def send_message(self, conversation_id: str, message_text: str) -> dict:
+        # everything said in this conversation SO FAR -- including any earlier advisory
+        # turns, which never touch the checkpoint (see below) and would otherwise be
+        # forgotten the moment this function returns. Read before inserting the new
+        # message so it doesn't see itself.
+        history = db.get_messages(self.conn, conversation_id)
         db.insert_message(self.conn, conversation_id, "operator", message_text)
 
         config = {"configurable": {"thread_id": conversation_id}}
@@ -97,7 +123,7 @@ class Runner:
 
         # already triaged (whether awaiting_approval or completed) -- lightweight advisory
         # reply, never touches the graph/checkpoint. See PLAN.md "Resuming" for why.
-        reply = self.advisory_fn(state, message_text)
+        reply = self.advisory_fn(state, history, message_text)
         db.insert_message(self.conn, conversation_id, "agent", reply)
 
         response = self._build_response(conversation_id)

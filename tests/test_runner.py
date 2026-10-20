@@ -146,7 +146,7 @@ async def test_send_message_on_decided_conversation_uses_advisory_path(tmp_path)
 
     advisory_calls = []
 
-    def fake_advisory(state, message_text):
+    def fake_advisory(state, history, message_text):
         advisory_calls.append((state["decision"]["action"], message_text))
         return "Hi! Your ticket is already resolved -- let me know if you need anything else."
 
@@ -163,6 +163,32 @@ async def test_send_message_on_decided_conversation_uses_advisory_path(tmp_path)
     assert stored_messages[-2]["role"] == "operator"
     assert stored_messages[-2]["content"] == "Hi, thanks!"
     assert stored_messages[-1]["role"] == "agent"
+
+
+async def test_send_message_remembers_earlier_advisory_turns(tmp_path):
+    """Found live: a second consult question had no idea what the first one was just
+    told, because advisory turns never touched the graph's checkpoint. send_message()
+    must hand the advisory_fn everything said so far (including its own prior replies),
+    not just the ticket's original decision context."""
+    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_auto_respond,
+                      route_fn=_route_to_action_decider)
+    await runner.ingest_ticket("c_memory", MESSAGES, {})
+
+    seen_histories = []
+
+    def fake_advisory(state, history, message_text):
+        seen_histories.append([(m["role"], m["content"]) for m in history])
+        return f"reply #{len(seen_histories)}"
+
+    runner.advisory_fn = fake_advisory
+    await runner.send_message("c_memory", "first question")
+    await runner.send_message("c_memory", "second question, refers to the first")
+
+    # the second call's history must include the operator's first question AND the
+    # agent's first reply -- neither existed yet when the first call's history was built
+    assert ("operator", "first question") not in seen_histories[0]
+    assert ("operator", "first question") in seen_histories[1]
+    assert ("agent", "reply #1") in seen_histories[1]
 
 
 async def test_graph_message_sync_survives_an_advisory_message_in_between(tmp_path):
