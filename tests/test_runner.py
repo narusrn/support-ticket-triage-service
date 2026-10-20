@@ -42,6 +42,29 @@ def _runner(tmp_path, **brain_fns) -> Runner:
     return Runner(conn, InMemorySaver(), **brain_fns)
 
 
+async def test_customer_metadata_reaches_classify_fn(tmp_path):
+    """Found live: customer_metadata was only ever written to storage.db, never visible to
+    the LLM -- classify_fn/decide_fn/route_fn all build their prompt purely from
+    state["messages"]. An enterprise ticket and a free-plan ticket with identical wording
+    would have classified identically, contradicting the spec's "metadata matters" and the
+    whole point of designing CustomerMetadata with plan/tenure/seats in the first place."""
+    seen_metadata_lines = []
+
+    def classify_fn(state):
+        seen_metadata_lines.append([m["content"] for m in state["messages"] if "plan=" in m["content"]])
+        return {"product_area": "billing", "issue_type": "x", "sentiment": "neutral",
+                "language": "en", "confidence": 0.9, "rationale": "x", "urgency": "low"}
+
+    runner = _runner(tmp_path, classify_fn=classify_fn, decide_fn=_decide_auto_respond,
+                      route_fn=_route_to_action_decider)
+    await runner.ingest_ticket("c_meta", [{"role": "customer", "content": "test"}],
+                                {"plan": "enterprise", "tenure_months": 8, "seats": 45})
+
+    assert len(seen_metadata_lines) == 1
+    assert "plan=enterprise" in seen_metadata_lines[0][0]
+    assert "seats=45" in seen_metadata_lines[0][0]
+
+
 async def test_ingest_ticket_persists_conversation_messages_and_decision(tmp_path):
     runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_with_refund,
                       route_fn=_route_to_action_decider)

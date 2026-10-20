@@ -65,10 +65,17 @@ class Runner:
         for m in messages:
             db.insert_message(self.conn, conversation_id, m["role"], m["content"], m.get("sent_at"))
 
+        # customer_metadata matters for triage (per spec) but was previously only ever
+        # written to storage.db -- never visible to classify_fn/decide_fn/route_fn, since
+        # those all build their prompt from state["messages"] alone. A second system
+        # message surfaces it the same way the main system prompt does.
+        metadata_line = ", ".join(f"{k}={v}" for k, v in customer_metadata.items())
         initial_state = {
             "conversation_id": conversation_id,
-            "messages": [{"role": "system", "content": get_supervisor_prompt()}]
-                        + [{"role": m["role"], "content": m["content"]} for m in messages],
+            "messages": [
+                {"role": "system", "content": get_supervisor_prompt()},
+                {"role": "system", "content": f"Customer metadata: {metadata_line}"},
+            ] + [{"role": m["role"], "content": m["content"]} for m in messages],
             "urgency": None, "extracted": None, "kb_results": None, "decision": None,
             "pending_tool": None, "tool_calls": [], "step": 0, "trace": [], "next_hop": None,
         }
