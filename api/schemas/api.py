@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Message(BaseModel):
@@ -22,13 +22,29 @@ class TicketIngestRequest(BaseModel):
     messages: list[Message] = Field(..., min_length=1, description="The full thread exactly as it already existed before this system saw it.")
     customer_metadata: CustomerMetadata
 
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "messages": [
+                {"role": "customer", "content": "My payment failed when I tried to upgrade to Pro. Can you check what's wrong?"},
+                {"role": "customer", "content": "I tried again with a different card. Now I see TWO pending charges but my account still shows Free plan??"},
+                {"role": "customer", "content": "Okay this is getting ridiculous. Just checked my bank app — I have THREE charges of $29.99 now. None refunded. And I STILL don't have Pro access."},
+                {"role": "customer", "content": "HELLO?? Is anyone there??? I need this fixed NOW. I have a presentation in 2 hours and need the Pro export features. If these charges aren't reversed by end of day I'm disputing all of them with my bank."},
+            ],
+            "customer_metadata": {"plan": "free", "tenure_months": 4, "prior_tickets": 0},
+        }
+    })
+
 
 class OperatorMessageRequest(BaseModel):
     message: str = Field(..., min_length=1, description="Free-text operator turn, e.g. a follow-up question.")
 
+    model_config = ConfigDict(json_schema_extra={"example": {"message": "why is this urgent?"}})
+
 
 class ApprovalRequest(BaseModel):
     reason: Optional[str] = Field(None, description="Why the operator approved or rejected this tool call — stored in the audit trail, surfaced via GET.")
+
+    model_config = ConfigDict(json_schema_extra={"example": {"reason": "verified in Stripe dashboard, confirmed duplicate"}})
 
 
 class ErrorDetail(BaseModel):
