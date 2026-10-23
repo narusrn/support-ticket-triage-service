@@ -40,7 +40,7 @@ from langgraph.types import Command, interrupt
 from pydantic import BaseModel, Field, ValidationError
 
 from agents import tools
-from agents.llm import LLMUnavailableError, call_with_retry, get_agents, get_supervisor_prompt, make_llm_client
+from agents.llm import LLMUnavailableError, call_with_retry, extract_usage, get_agents, get_supervisor_prompt, make_llm_client
 from api.schemas.decision import ExtractedInfo
 from config import settings
 from storage import db
@@ -168,9 +168,14 @@ def _call_with_validation_retry(fn: Callable[[], dict], model_cls, *, max_retrie
     LLMUnavailableError once call_with_retry's own budget is exhausted) -- either
     way, the caller falls back to escalate_to_human instead of crashing or guessing.
 
-    Returns (validated_model_or_None, failure_reason_or_None) -- the reason lets the
-    caller set an accurate decision rationale ("schema_validation_failed" vs
-    "llm_unavailable") instead of a single hardcoded one regardless of what failed.
+    Returns (validated_model_or_None, failure_reason_or_None, raw_dict_or_None) --
+    the reason lets the caller set an accurate decision rationale
+    ("schema_validation_failed" vs "llm_unavailable") instead of a single
+    hardcoded one regardless of what failed. `raw` is handed back too (even
+    though it's also what validated the model from) so a caller can read an
+    extra key validation itself doesn't care about -- see classify_fn/decide_fn's
+    "_usage" key, used for real token/cost tracking without widening their
+    public (state, messages) -> dict contract that test mocks everywhere rely on.
     """
     last_failure_reason = None
     for attempt in range(max_retries + 1):
@@ -179,15 +184,15 @@ def _call_with_validation_retry(fn: Callable[[], dict], model_cls, *, max_retrie
         except LLMUnavailableError:
             last_failure_reason = "llm_unavailable"
             if attempt == max_retries:
-                return None, last_failure_reason
+                return None, last_failure_reason, None
             continue
         try:
-            return model_cls.model_validate(raw), None
+            return model_cls.model_validate(raw), None, raw
         except ValidationError:
             last_failure_reason = "schema_validation_failed"
             if attempt == max_retries:
-                return None, last_failure_reason
-    return None, last_failure_reason
+                return None, last_failure_reason, None
+    return None, last_failure_reason, None
 
 
 def _single_tool_call(response, step: int) -> tuple[Optional[dict], list[dict]]:
@@ -297,15 +302,28 @@ def _default_classify_fn(state: GraphState, messages: list[dict]) -> dict:
     # free-form dict field (requires additionalProperties:false on every nested object,
     # including ones we don't control the shape of, like ToolCall.args) -- function-calling
     # mode doesn't have that restriction and is just as reliable for our schemas
-    llm = make_llm_client(settings.OPENAI_MODEL).with_structured_output(RawClassification, method="function_calling")
+    #
+    # include_raw=True: without it, with_structured_output() hands back only the parsed
+    # Pydantic object, discarding the raw AIMessage -- and with it, usage_metadata, the
+    # only place real token counts come from. Known gap noted in WRITEUP.md #7 until now.
+    llm = make_llm_client(settings.OPENAI_MODEL).with_structured_output(
+        RawClassification, method="function_calling", include_raw=True)
     result = call_with_retry(lambda: llm.invoke(messages))
-    return result.model_dump()
+    data = result["parsed"].model_dump() if result["parsed"] is not None else {}
+    # "_usage" is read back out by _call_with_validation_retry's caller, then discarded --
+    # Pydantic v2 ignores unknown fields by default, so RawClassification.model_validate()
+    # never sees or rejects it.
+    data["_usage"] = extract_usage(result["raw"], settings.OPENAI_MODEL)
+    return data
 
 
 def _default_decide_fn(state: GraphState, messages: list[dict]) -> dict:
-    llm = make_llm_client(settings.OPENAI_MODEL).with_structured_output(RawDecision, method="function_calling")
+    llm = make_llm_client(settings.OPENAI_MODEL).with_structured_output(
+        RawDecision, method="function_calling", include_raw=True)
     result = call_with_retry(lambda: llm.invoke(messages))
-    return result.model_dump()
+    data = result["parsed"].model_dump() if result["parsed"] is not None else {}
+    data["_usage"] = extract_usage(result["raw"], settings.OPENAI_MODEL)
+    return data
 
 
 def _default_supervisor_llm():
@@ -361,6 +379,9 @@ def build_graph(
             lc_messages.append(cls(m["content"]))
 
         response = call_with_retry(lambda: llm.invoke(lc_messages))
+        # bind_tools() (unlike with_structured_output()) hands back the raw AIMessage
+        # directly -- usage_metadata is already right there, no include_raw needed.
+        usage = extract_usage(response, settings.SUPERVISOR_MODEL)
         call, drop_trace = _single_tool_call(response, step)
         trace_entries += drop_trace
 
@@ -396,7 +417,8 @@ def build_graph(
                                           f"(model wanted: {handoff.reason})")
 
         updates["trace"] = trace_entries + [_trace(step, "supervisor", "handoff",
-                                                     payload={"to": handoff.next, "reason": handoff.reason})]
+                                                     payload={"to": handoff.next, "reason": handoff.reason},
+                                                     model=usage["model"], tokens=usage)]
 
         _SPECIALIST_LABELS = {"triage_classifier": "Triage Classifier", "kb_retriever": "KB Retriever",
                               "action_decider": "Action Decider"}
@@ -430,12 +452,18 @@ def build_graph(
     def call_triage_classifier(state: GraphState) -> dict:
         step = state["step"] + 1
         messages = _classification_messages(state)
-        validated, failure_reason = _call_with_validation_retry(lambda: classify_fn(state, messages), RawClassification)
+        validated, failure_reason, raw = _call_with_validation_retry(
+            lambda: classify_fn(state, messages), RawClassification)
+        usage = (raw or {}).get("_usage")
         if validated is None:
+            # a validation failure still cost a real API call (raw may carry "_usage"
+            # even when "parsed" came back None) -- track that spend too, not just the
+            # calls that happened to succeed.
             return {
                 "step": step,
                 "decision": {**_SCHEMA_FAILURE_DECISION, "rationale": failure_reason},
-                "trace": [_trace(step, "call_triage_classifier", failure_reason)],
+                "trace": [_trace(step, "call_triage_classifier", failure_reason,
+                                  model=usage.get("model") if usage else None, tokens=usage)],
             }
         extracted = validated.model_dump(exclude={"urgency"})
         # validated.rationale is free-form prose the model writes in the customer's own
@@ -450,12 +478,20 @@ def build_graph(
             "urgency": validated.urgency,
             "messages": state["messages"] + [status_message],
             "trace": [_trace(step, "call_triage_classifier", "decision",
-                              payload={"urgency": validated.urgency, **extracted})],
+                              payload={"urgency": validated.urgency, **extracted},
+                              model=usage.get("model") if usage else None, tokens=usage)],
         }
 
     def call_kb_retriever(state: GraphState) -> dict:
         step = state["step"] + 1
-        query = state.get("extracted", {}).get("issue_type", "") if state.get("extracted") else ""
+        # Found live (golden-set tickets 6/7): using extracted["issue_type"] (a short
+        # taxonomy tag like "feature_question") as the search query matched nothing in
+        # the FAQ corpus for anything but a lucky literal substring hit -- TF-IDF search
+        # needs the customer's own words, not a category label, to have any real chance
+        # of overlapping with the docs' vocabulary. "export my data as a CSV" scores
+        # 0.44 against faq_data_export; "feature_question" scores 0 against everything.
+        customer_text = " ".join(m["content"] for m in state["messages"] if m["role"] == "customer")
+        query = customer_text or (state.get("extracted") or {}).get("issue_type", "")
         results = tools.search_knowledge_base(query or "general question")
         # Found live: without a status message here, the supervisor's only input is
         # state["messages"] -- so with no record that kb_retriever already ran, every
@@ -486,12 +522,15 @@ def build_graph(
     def call_action_decider(state: GraphState) -> dict:
         step = state["step"] + 1
         messages = _decision_messages(state)
-        validated, failure_reason = _call_with_validation_retry(lambda: decide_fn(state, messages), RawDecision)
+        validated, failure_reason, raw = _call_with_validation_retry(
+            lambda: decide_fn(state, messages), RawDecision)
+        usage = (raw or {}).get("_usage")
         if validated is None:
             return {
                 "step": step,
                 "decision": {**_SCHEMA_FAILURE_DECISION, "rationale": failure_reason},
-                "trace": [_trace(step, "call_action_decider", failure_reason)],
+                "trace": [_trace(step, "call_action_decider", failure_reason,
+                                  model=usage.get("model") if usage else None, tokens=usage)],
             }
 
         decision = validated.model_dump(exclude={"pending_tool"})
@@ -506,7 +545,8 @@ def build_graph(
         updates: dict[str, Any] = {
             "step": step,
             "decision": decision,
-            "trace": [_trace(step, "call_action_decider", "decision", payload=decision)],
+            "trace": [_trace(step, "call_action_decider", "decision", payload=decision,
+                              model=usage.get("model") if usage else None, tokens=usage)],
         }
         if validated.pending_tool and validated.pending_tool.get("tool_name") in tools.SIDE_EFFECTING_TOOL_IMPLS:
             updates["pending_tool"] = validated.pending_tool

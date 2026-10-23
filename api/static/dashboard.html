@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Triage Service — Metrics</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0b0d12; --panel: #141720; --border: #262b38; --text: #e6e9f0; --muted: #8b93a7;
+    --accent: #6ea8fe; --good: #4ade80; --warn: #fbbf24; --bad: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 24px 16px 64px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+  .bar {
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px; margin-bottom: 20px;
+  }
+  .bar input {
+    background: #0e1117; border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 8px 10px; font-size: 13px; flex: 1; min-width: 200px;
+  }
+  .bar button {
+    background: var(--accent); color: #0b0d12; border: none; border-radius: 6px;
+    padding: 8px 16px; font-weight: 600; cursor: pointer; font-size: 13px;
+  }
+  .bar button:hover { opacity: 0.9; }
+  #status { color: var(--muted); font-size: 12px; }
+  #status.error { color: var(--bad); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .tile {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px;
+  }
+  .tile .label { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+  .tile .value { font-size: 24px; font-weight: 700; }
+  .grid { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
+  @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .panel h2 { font-size: 14px; margin: 0 0 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  .breakdown-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .breakdown-row:last-child { border-bottom: none; }
+  canvas { max-height: 280px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 20px 0; text-align: center; }
+</style>
+</head>
+<body>
+  <h1>Support Ticket Triage Service — Metrics</h1>
+  <p class="sub">Service-wide rollup across every conversation (GET /api/v1/metrics).</p>
+
+  <div class="bar">
+    <input id="apiKey" type="password" placeholder="X-API-Key (leave blank if auth is disabled)">
+    <button onclick="load()">Load</button>
+    <span id="status"></span>
+  </div>
+
+  <div class="tiles" id="tiles"></div>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>Requests &amp; tokens over time</h2>
+      <canvas id="timeseriesChart"></canvas>
+    </div>
+    <div>
+      <div class="panel">
+        <h2>Action breakdown</h2>
+        <div id="actionBreakdown"></div>
+      </div>
+      <div class="panel">
+        <h2>Urgency breakdown</h2>
+        <div id="urgencyBreakdown"></div>
+      </div>
+      <div class="panel">
+        <h2>Tool-call status</h2>
+        <div id="toolBreakdown"></div>
+      </div>
+    </div>
+  </div>
+
+<script>
+let chart = null;
+
+function renderBreakdown(elId, breakdown) {
+  const el = document.getElementById(elId);
+  const entries = Object.entries(breakdown || {});
+  if (!entries.length) { el.innerHTML = '<div class="empty">No data yet</div>'; return; }
+  el.innerHTML = entries
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `<div class="breakdown-row"><span>${k}</span><strong>${v}</strong></div>`)
+    .join("");
+}
+
+function renderTiles(m) {
+  const tiles = [
+    ["Conversations", m.total_conversations],
+    ["Runs (requests)", m.total_runs],
+    ["Total tokens", m.total_tokens.toLocaleString()],
+    ["Total cost (USD)", "$" + m.total_cost_usd.toFixed(4)],
+    ["Avg latency (ms)", Math.round(m.avg_latency_ms)],
+  ];
+  document.getElementById("tiles").innerHTML = tiles
+    .map(([label, value]) => `<div class="tile"><div class="label">${label}</div><div class="value">${value}</div></div>`)
+    .join("");
+}
+
+function renderChart(timeseries) {
+  const ctx = document.getElementById("timeseriesChart").getContext("2d");
+  const labels = timeseries.map(p => p.bucket.replace("T", " ").slice(0, 16));
+  const runs = timeseries.map(p => p.runs);
+  const tokens = timeseries.map(p => p.tokens);
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        { label: "Runs", data: runs, borderColor: "#6ea8fe", backgroundColor: "#6ea8fe33", yAxisID: "y", tension: 0.25 },
+        { label: "Tokens", data: tokens, borderColor: "#4ade80", backgroundColor: "#4ade8033", yAxisID: "y1", tension: 0.25 },
+      ],
+    },
+    options: {
+      responsive: true,
+      interaction: { mode: "index", intersect: false },
+      scales: {
+        y: { type: "linear", position: "left", title: { display: true, text: "runs" } },
+        y1: { type: "linear", position: "right", title: { display: true, text: "tokens" }, grid: { drawOnChartArea: false } },
+      },
+      plugins: { legend: { labels: { color: "#e6e9f0" } } },
+    },
+  });
+}
+
+async function load() {
+  const status = document.getElementById("status");
+  status.className = "";
+  status.textContent = "Loading…";
+  const key = document.getElementById("apiKey").value;
+  try {
+    const resp = await fetch("/api/v1/metrics", { headers: key ? { "X-API-Key": key } : {} });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      throw new Error(body?.error?.message || `HTTP ${resp.status}`);
+    }
+    const m = await resp.json();
+    renderTiles(m);
+    renderChart(m.timeseries);
+    renderBreakdown("actionBreakdown", m.action_breakdown);
+    renderBreakdown("urgencyBreakdown", m.urgency_breakdown);
+    renderBreakdown("toolBreakdown", m.tool_call_status_breakdown);
+    status.textContent = "Updated " + new Date().toLocaleTimeString();
+  } catch (err) {
+    status.className = "error";
+    status.textContent = "Failed: " + err.message;
+  }
+}
+
+// convenience: remember the key for this browser only (never sent anywhere but this API)
+try {
+  const saved = localStorage.getItem("triage_dashboard_api_key");
+  if (saved) document.getElementById("apiKey").value = saved;
+} catch (e) {}
+document.getElementById("apiKey").addEventListener("change", (e) => {
+  try { localStorage.setItem("triage_dashboard_api_key", e.target.value); } catch (err) {}
+});
+document.getElementById("apiKey").addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
+
+load();
+</script>
+</body>
+</html>

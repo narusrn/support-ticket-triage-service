@@ -1,12 +1,18 @@
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Path, Request, status
 
 from api.schemas.api import ApprovalRequest, ErrorResponse, OperatorMessageRequest, UsageSummary
 from api.schemas.decision import ConversationDetail, TicketResponse
 from storage import db
 
 router = APIRouter()
+
+_CONVERSATION_ID = Path(..., description="The conversation_id returned by POST /tickets.",
+                        examples=["c_a1b2c3d4"])
+_TOOL_CALL_ID = Path(..., description="A tool_call_id from decision.tool_calls -- stable across retries and "
+                                       "server restarts (derived from a hash of conversation_id, tool_name, "
+                                       "and args), unlike Python's hash().", examples=["tc_a30ebab79e"])
 
 
 def _require_conversation(conn, conversation_id: str) -> dict:
@@ -25,14 +31,34 @@ def _require_conversation(conn, conversation_id: str) -> dict:
     summary="Operator turn -- discuss an already-triaged ticket",
     description=(
         "Free-text follow-up on a conversation that already has a decision (whether "
-        "awaiting_approval or completed). Never re-enters the triage graph -- answers from "
-        "the current state via a lightweight advisory call. Cannot approve, reject, or "
-        "execute anything regardless of what the message says; only the dedicated "
-        "approve/reject endpoints can do that."
+        "`awaiting_approval` or `completed`) -- e.g. an operator asking 'why is this urgent?' "
+        "or 'what KB article did this cite?'.\n\n"
+        "**Never re-enters the triage graph.** This is a lightweight advisory call over the "
+        "current decision + the full prior message history (including earlier advisory turns "
+        "in the same conversation, so follow-ups like 'and in Thai baht?' work). It cannot "
+        "approve, reject, or execute anything regardless of what the message says or implies "
+        "-- that boundary is enforced in code (only the dedicated approve/reject endpoints "
+        "below can resume the graph), not by trusting the model to refuse.\n\n"
+        "The reply is both returned in `reply` and persisted, so it shows up in the `messages` "
+        "list from `GET /conversations/{conversation_id}` afterward."
     ),
-    responses={404: {"model": ErrorResponse, "description": "Unknown conversation_id."}},
+    responses={
+        404: {"model": ErrorResponse, "description": "Unknown conversation_id."},
+        200: {"content": {"application/json": {"example": {
+            "conversation_id": "c_a1b2c3d4", "status": "awaiting_approval",
+            "decision": {"urgency": "critical", "action": "escalate_to_human", "confidence": 0.9,
+                         "extracted": {"product_area": "billing", "issue_type": "duplicate_charge",
+                                       "sentiment": "angry", "language": "en", "confidence": 0.9,
+                                       "rationale": "3 charges in 2h"},
+                         "draft_reply": None, "tool_calls": [], "rationale": "needs approval",
+                         "cited_kb_doc_ids": []},
+            "reply": "This is urgent because three separate charges were captured, not just pending holds.",
+        }}}},
+    },
 )
-async def send_message(conversation_id: str, body: OperatorMessageRequest, request: Request) -> TicketResponse:
+async def send_message(
+    body: OperatorMessageRequest, request: Request, conversation_id: str = _CONVERSATION_ID,
+) -> TicketResponse:
     _require_conversation(request.app.state.conn, conversation_id)
     runner = request.app.state.runner
     result = await runner.send_message(conversation_id, body.message)
@@ -45,14 +71,36 @@ async def send_message(conversation_id: str, body: OperatorMessageRequest, reque
     response_model=TicketResponse,
     summary="Approve a pending side-effecting tool call",
     description=(
-        "The only path that actually executes issue_refund or open_incident_or_page_oncall. "
-        "Idempotent: if this tool_call was already resolved (by an earlier approve/reject "
-        "call), returns the stored result without touching the graph or re-executing anything."
+        "**The only code path that actually executes `issue_refund` or "
+        "`open_incident_or_page_oncall`.** There is no way for the agent to run either tool "
+        "on its own -- `action_decider` can only ever propose one, which suspends the graph "
+        "(`interrupt()`) until a human calls this endpoint. Resumes the graph from exactly "
+        "where it paused, dispatches the real (mocked) side effect, and returns the updated "
+        "decision with `tool_calls[].status == \"executed\"`.\n\n"
+        "**Idempotent**: if this `tool_call_id` was already resolved by an earlier approve or "
+        "reject call, returns the stored result (`replayed: true` internally) without "
+        "touching the graph or re-running the side effect a second time -- safe to retry on a "
+        "timeout or double-click."
     ),
-    responses={404: {"model": ErrorResponse, "description": "Unknown conversation_id or tool_call_id."}},
+    responses={
+        404: {"model": ErrorResponse, "description": "Unknown conversation_id or tool_call_id."},
+        200: {"content": {"application/json": {"example": {
+            "conversation_id": "c_a1b2c3d4", "status": "completed",
+            "decision": {"urgency": "critical", "action": "escalate_to_human", "confidence": 0.9,
+                         "extracted": {"product_area": "billing", "issue_type": "duplicate_charge",
+                                       "sentiment": "angry", "language": "en", "confidence": 0.9,
+                                       "rationale": "3 charges in 2h"},
+                         "draft_reply": None, "rationale": "needs approval", "cited_kb_doc_ids": [],
+                         "tool_calls": [{"tool_call_id": "tc_a30ebab79e", "tool_name": "issue_refund",
+                                          "args": {"charge_ids": ["ch_1", "ch_2", "ch_3"], "amount_usd": 89.97},
+                                          "status": "executed", "reason": "verified in Stripe",
+                                          "result": {"refund_id": "re_123456", "status": "succeeded"}}]},
+        }}}},
+    },
 )
 async def approve_tool_call(
-    conversation_id: str, tool_call_id: str, request: Request, body: Optional[ApprovalRequest] = None
+    request: Request, conversation_id: str = _CONVERSATION_ID, tool_call_id: str = _TOOL_CALL_ID,
+    body: Optional[ApprovalRequest] = None,
 ) -> TicketResponse:
     _require_conversation(request.app.state.conn, conversation_id)
     runner = request.app.state.runner
@@ -71,11 +119,17 @@ async def approve_tool_call(
     "/conversations/{conversation_id}/tool-calls/{tool_call_id}/reject",
     response_model=TicketResponse,
     summary="Reject a pending side-effecting tool call",
-    description="Same resume path as approve, but the side effect is never executed.",
+    description=(
+        "Same resume path as `/approve` -- the graph wakes up from the same `interrupt()` -- "
+        "but the side effect is never dispatched. `tool_calls[].status` becomes `\"rejected\"` "
+        "and `result` stays `null`. Also idempotent: resolving an already-resolved tool call "
+        "again just returns the stored (rejected) result."
+    ),
     responses={404: {"model": ErrorResponse, "description": "Unknown conversation_id or tool_call_id."}},
 )
 async def reject_tool_call(
-    conversation_id: str, tool_call_id: str, request: Request, body: Optional[ApprovalRequest] = None
+    request: Request, conversation_id: str = _CONVERSATION_ID, tool_call_id: str = _TOOL_CALL_ID,
+    body: Optional[ApprovalRequest] = None,
 ) -> TicketResponse:
     _require_conversation(request.app.state.conn, conversation_id)
     runner = request.app.state.runner
@@ -94,10 +148,18 @@ async def reject_tool_call(
     "/conversations/{conversation_id}",
     response_model=ConversationDetail,
     summary="Full audit trail for a conversation",
-    description="Messages, every decision, every tool call, and a rolled-up usage summary.",
+    description=(
+        "Everything recorded for one conversation: the raw customer thread, every internal "
+        "agent dialogue line (Supervisor/Triage Classifier/KB Retriever/Action Decider/System), "
+        "every operator follow-up, every decision ever reached, every tool call proposed "
+        "(regardless of status), and a rolled-up usage summary (runs/tokens/cost/latency) for "
+        "just this conversation. Works identically whether called right after ingest or after "
+        "a server restart days later -- it's read straight from SQLite, not from any in-memory "
+        "graph state."
+    ),
     responses={404: {"model": ErrorResponse, "description": "Unknown conversation_id."}},
 )
-async def get_conversation(conversation_id: str, request: Request) -> ConversationDetail:
+async def get_conversation(request: Request, conversation_id: str = _CONVERSATION_ID) -> ConversationDetail:
     conn = request.app.state.conn
     conv = _require_conversation(conn, conversation_id)
     usage = db.get_usage_summary(conn, conversation_id)

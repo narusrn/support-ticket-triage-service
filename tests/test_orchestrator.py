@@ -7,6 +7,7 @@ needed, for any test in this file.
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
+from agents import tools
 from agents.orchestrator import GraphState, _REACT_LANGUAGE_RULE, _language_rule, build_graph, maybe_trim_messages
 from agents.llm import LLMUnavailableError
 from config import settings
@@ -128,6 +129,43 @@ def test_search_knowledge_base_never_suspends_the_graph(tmp_path):
     assert result["kb_results"] is not None
     assert result["decision"]["action"] == "auto_respond"
     assert any(m["content"].startswith("KB Retriever:") for m in result["messages"])
+
+
+def test_kb_retriever_searches_with_the_customers_own_words_not_a_taxonomy_tag(tmp_path, monkeypatch):
+    """Found live (golden-set tickets 6/7 against the real model): issue_type is a
+    short category tag like "feature_question" -- using it as the TF-IDF search query
+    matched nothing in the FAQ corpus (no overlap with any doc's actual vocabulary),
+    silently starving action_decider of KB results it should have had. The query must
+    be built from what the customer actually said, not the classifier's label for it."""
+    conn = _conn(tmp_path)
+    seen_queries = []
+
+    def fake_search(query, *args, **kwargs):
+        seen_queries.append(query)
+        return []
+
+    monkeypatch.setattr(tools, "search_knowledge_base", fake_search)
+
+    def classify_fn(state, messages):
+        return {**VALID_FAQ_CLASSIFICATION, "issue_type": "feature_question"}
+
+    def decide_fn(state, messages):
+        return {"action": "route_to_specialist", "rationale": "x", "confidence": 0.9,
+                "cited_kb_doc_ids": [], "draft_reply": None, "pending_tool": None}
+
+    llm = _ScriptedLLM([
+        _FakeResponse([_handoff_call("triage_classifier")]),
+        _FakeResponse([_handoff_call("kb_retriever")]),
+        _FakeResponse([_handoff_call("action_decider")]),
+    ])
+    graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, decide_fn=decide_fn, supervisor_llm=llm)
+    state = _initial_state()
+    state["messages"] = [{"role": "customer", "content": "How do I export my data as a CSV?"}]
+    graph.invoke(state, {"configurable": {"thread_id": "c_kb_query"}})
+
+    assert len(seen_queries) == 1
+    assert "feature_question" not in seen_queries[0]
+    assert "export" in seen_queries[0].lower()
 
 
 def test_kb_retriever_reports_back_so_supervisor_does_not_loop_on_it(tmp_path):

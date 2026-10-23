@@ -10,7 +10,7 @@ from typing import Callable, Optional, TypeVar
 import yaml
 from langchain_openai import ChatOpenAI
 
-from config import settings
+from config import MODEL_PRICES_USD_PER_1K, settings
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -77,6 +77,21 @@ def get_supervisor_prompt(prompts_dir: Path = PROMPTS_DIR) -> str:
 
 def make_llm_client(model: str) -> ChatOpenAI:
     return ChatOpenAI(model=model, api_key=settings.OPENAI_API_KEY)
+
+
+def extract_usage(response, model: str) -> dict:
+    """Pulls real token usage off a raw AIMessage (LangChain's standard
+    `usage_metadata` attribute) and prices it against MODEL_PRICES_USD_PER_1K --
+    the one thing that table was added for but, until now, nothing ever read.
+    A fake test response with no `usage_metadata` attribute just yields zeros,
+    not a crash, via getattr's default."""
+    meta = getattr(response, "usage_metadata", None) or {}
+    prompt = meta.get("input_tokens", 0)
+    completion = meta.get("output_tokens", 0)
+    total = meta.get("total_tokens", prompt + completion)
+    prices = MODEL_PRICES_USD_PER_1K.get(model, {"input": 0.0, "output": 0.0})
+    cost_usd = (prompt / 1000) * prices["input"] + (completion / 1000) * prices["output"]
+    return {"model": model, "prompt": prompt, "completion": completion, "total": total, "cost_usd": cost_usd}
 
 
 class LLMUnavailableError(Exception):

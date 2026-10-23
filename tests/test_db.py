@@ -105,6 +105,39 @@ def test_trace_events_and_runs_round_trip(tmp_path):
     conn.close()
 
 
+def test_global_metrics_aggregates_across_every_conversation(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    db.init_db(db_path)
+    conn = db.get_connection(db_path)
+
+    db.insert_conversation(conn, "c_1", "completed", {})
+    db.insert_conversation(conn, "c_2", "awaiting_approval", {})
+
+    db.insert_run(conn, {
+        "run_id": "run_1", "conversation_id": "c_1", "started_at": "2026-10-20T00:00:00Z",
+        "duration_ms": 600, "steps": 3, "tokens": {"total": 1000}, "cost_usd": 0.001,
+        "final_urgency": "critical", "final_action": "escalate_to_human", "completed": True,
+    })
+    db.insert_run(conn, {
+        "run_id": "run_2", "conversation_id": "c_2", "started_at": "2026-10-20T01:00:00Z",
+        "duration_ms": 400, "steps": 2, "tokens": {"total": 500}, "cost_usd": 0.0005,
+        "final_urgency": "low", "final_action": "auto_respond", "completed": True,
+    })
+    db.insert_tool_call(conn, "tc_1", "c_1", "issue_refund", {}, "executed")
+    db.insert_tool_call(conn, "tc_2", "c_2", "issue_refund", {}, "pending_approval")
+
+    metrics = db.get_global_metrics(conn)
+    assert metrics["total_conversations"] == 2
+    assert metrics["total_runs"] == 2
+    assert metrics["total_tokens"] == 1500
+    assert round(metrics["total_cost_usd"], 6) == round(0.0015, 6)
+    assert metrics["action_breakdown"] == {"escalate_to_human": 1, "auto_respond": 1}
+    assert metrics["urgency_breakdown"] == {"critical": 1, "low": 1}
+    assert metrics["tool_call_status_breakdown"] == {"executed": 1, "pending_approval": 1}
+    assert len(metrics["timeseries"]) == 2  # two different hour buckets
+    conn.close()
+
+
 def test_restart_survival_reopening_same_file(tmp_path):
     db_path = str(tmp_path / "restart_test.db")
     db.init_db(db_path)

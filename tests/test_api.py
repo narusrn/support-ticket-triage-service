@@ -255,3 +255,33 @@ def test_health_check_does_not_require_api_key(secured_client):
     # infra/monitoring checks shouldn't need a key
     response = secured_client.get("/health")
     assert response.status_code == 200
+
+
+# --- metrics / dashboard ---
+
+def test_metrics_requires_api_key(secured_client):
+    response = secured_client.get("/api/v1/metrics")
+    assert response.status_code == 401
+
+
+def test_metrics_returns_rolled_up_shape_after_an_ingest(client):
+    client.post("/api/v1/tickets", json={
+        "messages": [{"role": "customer", "content": "My payment failed, now I see three charges."}],
+        "customer_metadata": {"plan": "free", "tenure_months": 4},
+    })
+    response = client.get("/api/v1/metrics")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_conversations"] >= 1
+    assert body["total_runs"] >= 1
+    assert "escalate_to_human" in body["action_breakdown"]
+    assert isinstance(body["timeseries"], list)
+
+
+def test_dashboard_does_not_require_api_key_and_returns_html(secured_client):
+    # a plain browser navigation can't attach a custom X-API-Key header -- the page
+    # itself must stay reachable even when auth is configured; see api/routes/metrics.py
+    response = secured_client.get("/api/v1/dashboard")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "Chart" in response.text  # Chart.js is wired in, not a placeholder page

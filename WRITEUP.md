@@ -151,31 +151,40 @@ with an honest `rationale`, not a crash:
 
 ## 4. Testing & eval
 
-- **97 pytest tests**, LLM calls mocked at the brain-function boundary
+- **108 pytest tests**, LLM calls mocked at the brain-function boundary
   (`classify_fn`/`decide_fn`/`supervisor_llm` are injectable into `build_graph()`) —
   no network call, no API key needed. Covers routing order, the single-tool-call
   guard, the approval gate, context trimming, loop-guard, schema-retry fallback,
-  idempotent approve/reject, and API contract/error-shape — including a direct
-  regression test for each of the four bugs described above.
-- **`eval/run_eval.py`** runs the *real* agent (real OpenAI calls) over 5 labeled
-  tickets (3 realistic + 2 synthetic edge cases: a bare greeting, and the
-  prompt-injection case above). Last real run, against the tool-calling supervisor:
-  - **100%** on action choice, tool selection, KB-retriever routing, and language
-    detection (including correctly detecting Thai against an English-only FAQ corpus).
-  - **60%** on exact urgency match — misses were `ticket_3_dark_mode` (`low` vs.
-    `medium`) and the injection ticket (`medium` vs. `high`), both genuinely
-    borderline calls. This reads as real calibration noise in the classifier, not a
-    logic bug, and matches the same 60% the structured-output router scored before
-    this change — the supervisor mechanism swap didn't move this number either way.
-    A stricter rubric in `triage_classifier.md` would be the next thing to try if
-    this mattered for production.
+  idempotent approve/reject, token/cost rollup, and API contract/error-shape —
+  including a direct regression test for each bug described in this doc.
+- **`eval/run_eval.py`** runs the *real* agent (real OpenAI calls) over 8 labeled
+  tickets: the original 3 realistic + 2 synthetic edge cases (a bare greeting, the
+  prompt-injection case above), plus 3 added later specifically to exercise the
+  `auto_respond` + cited-KB-doc path end to end — none of the first 5 ever actually
+  took it, so the LLM-as-judge groundedness pass had never once fired. Adding them
+  surfaced a real bug: `call_kb_retriever` searched using `extracted["issue_type"]`
+  (a short classifier tag like `"feature_question"`) instead of the customer's own
+  words — a category label has near-zero token overlap with the FAQ docs' actual
+  vocabulary, so TF-IDF search silently returned nothing for exactly the kind of
+  question `kb_retriever` exists to answer. Fixed by searching with the customer's
+  message text instead; `faq_data_export`'s score against `"feature_question"` was
+  `0`, against `"export my data as a CSV"` it's `0.44`. Last real run after the fix:
+  - **100%** on language and tool selection; the judge pass now actually fires and
+    passed (`grounded: true`) on the new data-export ticket.
+  - **87.5%** on action choice and KB-retriever routing — one miss each, both the
+    password-reset ticket (the supervisor sometimes skips `kb_retriever` and routes
+    straight to `action_decider` instead, a routing judgment call, not a search-quality
+    issue this time).
+  - **62.5%** on exact urgency match — same kind of borderline-calibration misses as
+    before (`critical` vs. `high`, `low` vs. `medium`), not a logic bug; see the
+    original 3-ticket run's note on this below for how this baseline was established.
   - Autonomy boundary held on the injection ticket, as above — still true under the
     tool-calling supervisor, including the one real risk that design reintroduces
     (a model emitting two tool calls in one turn): `_single_tool_call()` never
     triggered during this run, but the guard and its trace event are tested directly
     in `tests/test_orchestrator.py`, not just assumed safe.
-  - Caught one real harness bug while building this: the LLM-as-judge pass was
-    scoring the greeting's reply for "groundedness" even though it's a synthetic
+  - Caught one other real harness bug while first building this: the LLM-as-judge pass
+    was scoring the greeting's reply for "groundedness" even though it's a synthetic
     `direct_reply` decision that never cites any KB doc — fixed by only judging
     `auto_respond` decisions that actually cite something.
 
@@ -191,6 +200,19 @@ with an honest `rationale`, not a crash:
 - **API key auth** (`X-API-Key`) — the opposite direction: the spec explicitly lists
   auth as out of scope, but added anyway on request, gated behind an empty-string
   default so it's a no-op unless `API_KEY` is actually set in `.env`.
+- **`GET /metrics` + `GET /dashboard`** — added on request, for request/token/cost
+  observability across the whole service rather than per-conversation. Closes a gap
+  this doc used to flag under "If this were going to production": `with_structured_output()`
+  was called without `include_raw=True`, discarding the raw `AIMessage` — and with
+  it, `usage_metadata` — the moment it parsed into a Pydantic object, so `runs.tokens`/
+  `cost_usd` were always 0 regardless of real spend. `agents/llm.py`'s `extract_usage()`
+  is now the one place every LLM call site (classify/decide/supervisor) reads real
+  usage from and prices against the already-existing `MODEL_PRICES_USD_PER_1K` table.
+  `/metrics` is behind the same `X-API-Key` guard as every other endpoint; `/dashboard`
+  (the HTML page built on it) deliberately is not, since a plain browser navigation
+  can't attach a custom header — it asks for the key in a field instead, the same
+  shape as Swagger's own "Authorize" button, before making its own `/metrics` calls
+  that key does gate.
 
 ## 6. Fixed during review
 
@@ -235,14 +257,10 @@ regression test in `tests/test_orchestrator.py`.
 
 ## 7. If this were going to production
 
-- Swap the static `MODEL_PRICES_USD_PER_1K` table for live usage from the OpenAI
-  response (`usage.total_tokens` is currently always 0 — the token/cost accounting
-  plumbing exists in `runs`/`trace_events` but nothing populates it yet, since the
-  default LLM clients don't thread `response.usage_metadata` back through
-  `_default_classify_fn`/`_default_decide_fn`/`_default_supervisor_llm`).
-  - Add real request-level rate limiting and per-customer (not just per-deployment)
-    API keys.
-  - Swap SQLite for Postgres under concurrent write load — the schema already
-    doesn't assume SQLite specifically beyond `check_same_thread=False`.
-  - Point `trace_events`/`runs` at a real tracing backend (e.g. LangSmith) instead
-    of in-house JSON rows, once the token/cost volume justifies it.
+- Add real request-level rate limiting and per-customer (not just per-deployment)
+  API keys.
+- Swap SQLite for Postgres under concurrent write load — the schema already
+  doesn't assume SQLite specifically beyond `check_same_thread=False`.
+- Point `trace_events`/`runs` at a real tracing backend (e.g. LangSmith) instead
+  of in-house JSON rows, once the token/cost volume justifies it — `GET /metrics`'s
+  hourly buckets are a reasonable stand-in until then, not a permanent substitute.

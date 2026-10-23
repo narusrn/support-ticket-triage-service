@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from agents.runner import Runner
-from api.routes import conversations, tickets
+from api.routes import conversations, metrics, tickets
 from api.schemas.api import ErrorDetail, ErrorResponse
 from api.security import verify_api_key
 from config import settings
@@ -80,3 +80,9 @@ async def health():
 # under /api/v1 requires X-API-Key, enforced once here rather than per-route.
 app.include_router(tickets.router, prefix="/api/v1", tags=["tickets"], dependencies=[Depends(verify_api_key)])
 app.include_router(conversations.router, prefix="/api/v1", tags=["conversations"], dependencies=[Depends(verify_api_key)])
+# No router-level dependency here: /metrics needs the same X-API-Key guard as every other
+# endpoint, but /dashboard is a plain HTML page a browser navigates to directly (no way
+# to attach a custom header to that), so it carries no auth dependency of its own -- see
+# api/routes/metrics.py's own per-route `dependencies=` on get_metrics for where the guard
+# actually lives.
+app.include_router(metrics.router, prefix="/api/v1", tags=["metrics"])

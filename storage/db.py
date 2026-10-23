@@ -326,3 +326,39 @@ def get_usage_summary(conn: sqlite3.Connection, conversation_id: str) -> dict:
         (conversation_id,),
     ).fetchone()
     return dict(row)
+
+
+def get_global_metrics(conn: sqlite3.Connection) -> dict:
+    """Service-wide rollup for the metrics dashboard -- same shape of query as
+    get_usage_summary() above, just without the WHERE conversation_id filter,
+    plus a few breakdowns/a timeseries for the "requests over time" graph."""
+    totals = conn.execute(
+        "SELECT COUNT(*) as total_runs, "
+        "COALESCE(SUM(json_extract(tokens, '$.total')), 0) as total_tokens, "
+        "COALESCE(SUM(cost_usd), 0) as total_cost_usd, "
+        "COALESCE(AVG(duration_ms), 0) as avg_latency_ms "
+        "FROM runs"
+    ).fetchone()
+    total_conversations = conn.execute("SELECT COUNT(*) as n FROM conversations").fetchone()["n"]
+
+    def _breakdown(column: str, table: str = "runs") -> dict:
+        rows = conn.execute(f"SELECT {column} as k, COUNT(*) as n FROM {table} WHERE {column} IS NOT NULL GROUP BY {column}").fetchall()
+        return {r["k"]: r["n"] for r in rows}
+
+    timeseries = conn.execute(
+        "SELECT strftime('%Y-%m-%dT%H:00:00', started_at) as bucket, COUNT(*) as runs, "
+        "COALESCE(SUM(json_extract(tokens, '$.total')), 0) as tokens "
+        "FROM runs GROUP BY bucket ORDER BY bucket"
+    ).fetchall()
+
+    return {
+        "total_conversations": total_conversations,
+        "total_runs": totals["total_runs"],
+        "total_tokens": totals["total_tokens"],
+        "total_cost_usd": totals["total_cost_usd"],
+        "avg_latency_ms": totals["avg_latency_ms"],
+        "action_breakdown": _breakdown("final_action"),
+        "urgency_breakdown": _breakdown("final_urgency"),
+        "tool_call_status_breakdown": _breakdown("status", table="tool_calls"),
+        "timeseries": [{"bucket": r["bucket"], "runs": r["runs"], "tokens": r["tokens"]} for r in timeseries],
+    }

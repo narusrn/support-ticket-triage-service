@@ -212,10 +212,25 @@ class Runner:
 
         self._sync_graph_messages(conversation_id, result_state)
 
+        # Rolled up from the same trace entries being inserted below -- each LLM-calling
+        # node already attaches its own real usage (see agents/orchestrator.py's
+        # extract_usage()); this is just the sum across one run, which is what the
+        # runs table (and the metrics dashboard built on top of it) actually tracks.
+        tokens_total = {"prompt": 0, "completion": 0, "total": 0}
+        cost_usd_total = 0.0
+        models_used: dict[str, str] = {}
         for entry in result_state.get("trace", []):
             db.insert_trace_event(self.conn, run_id, conversation_id, entry["step_index"], entry["node"],
                                    entry["event_type"], payload=entry.get("payload"), model=entry.get("model"),
                                    latency_ms=entry.get("latency_ms"), tokens=entry.get("tokens"))
+            usage = entry.get("tokens")
+            if usage:
+                tokens_total["prompt"] += usage.get("prompt", 0)
+                tokens_total["completion"] += usage.get("completion", 0)
+                tokens_total["total"] += usage.get("total", 0)
+                cost_usd_total += usage.get("cost_usd", 0.0)
+                if entry.get("model"):
+                    models_used[entry["node"]] = entry["model"]
 
         decision = result_state.get("decision")
         if decision is not None and not self._decision_unchanged(conversation_id, decision):
@@ -229,6 +244,9 @@ class Runner:
             "started_at": _iso(started_at), "finished_at": _iso(finished_at),
             "duration_ms": int((finished_at - started_at) * 1000),
             "steps": result_state.get("step", 0),
+            "tokens": tokens_total,
+            "cost_usd": cost_usd_total,
+            "models_used": models_used,
             "final_urgency": decision.get("urgency") if decision else None,
             "final_action": decision.get("action") if decision else None,
             "pending_approvals": pending,

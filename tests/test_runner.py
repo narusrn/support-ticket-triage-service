@@ -269,3 +269,31 @@ async def test_restart_survival_resume_works_with_a_fresh_runner_and_real_sqlite
     assert result["status"] == "completed"
     assert result["decision"]["tool_calls"][0]["status"] == "executed"
     assert result["decision"]["tool_calls"][0]["reason"] == "verified after restart"
+
+
+async def test_real_token_usage_rolls_up_into_the_runs_row(tmp_path):
+    """classify_fn/decide_fn can attach a "_usage" key -- the same convention
+    _default_classify_fn/_default_decide_fn use for real token tracking
+    (agents/llm.py's extract_usage()). Pydantic ignores the extra key during
+    RawClassification/RawDecision validation, but _persist_run() must still
+    read it back out of the raw dict and roll it up into the runs table."""
+    def classify_fn(state, messages):
+        data = dict(_classify_billing(state, messages))
+        data["_usage"] = {"model": "gpt-4o-mini", "prompt": 100, "completion": 20, "total": 120, "cost_usd": 0.001}
+        return data
+
+    def decide_fn(state, messages):
+        data = dict(_decide_auto_respond(state, messages))
+        data["_usage"] = {"model": "gpt-4o-mini", "prompt": 200, "completion": 50, "total": 250, "cost_usd": 0.002}
+        return data
+
+    runner = _runner(tmp_path, classify_fn=classify_fn, decide_fn=decide_fn)
+    await runner.ingest_ticket("c_usage", MESSAGES, {})
+
+    runs = db.get_runs(runner.conn, "c_usage")
+    assert len(runs) == 1
+    run = runs[0]
+    assert run["tokens"]["total"] == 370  # 120 (classify) + 250 (decide)
+    assert round(run["cost_usd"], 6) == round(0.003, 6)
+    assert run["models_used"]["call_triage_classifier"] == "gpt-4o-mini"
+    assert run["models_used"]["call_action_decider"] == "gpt-4o-mini"

@@ -72,7 +72,37 @@ class ErrorResponse(BaseModel):
 
 
 class UsageSummary(BaseModel):
-    total_runs: int
-    total_tokens: int
-    cost_usd: float
-    avg_latency_ms: float
+    total_runs: int = Field(..., description="One run per graph invocation for this conversation -- the initial "
+                                               "ingest, plus one more for every approve/reject resume.")
+    total_tokens: int = Field(..., description="Summed across every LLM call (supervisor + specialists) in every "
+                                                  "run, real usage from the OpenAI response, not an estimate.")
+    cost_usd: float = Field(..., description="Priced from total_tokens against config.py's MODEL_PRICES_USD_PER_1K.")
+    avg_latency_ms: float = Field(..., description="Average wall-clock duration per run (ingest or resume), in ms.")
+
+
+class TimeseriesPoint(BaseModel):
+    bucket: str = Field(..., description="Hour bucket, ISO 8601 (e.g. '2026-10-23T14:00:00').")
+    runs: int = Field(..., description="Number of graph invocations that started in this hour.")
+    tokens: int = Field(..., description="Total tokens consumed by runs that started in this hour.")
+
+
+class MetricsResponse(BaseModel):
+    """Service-wide rollup for GET /metrics and the dashboard built on it --
+    mirrors storage.db.get_global_metrics()'s shape exactly. All totals are
+    per RUN (one graph invocation), not per conversation -- a ticket that
+    gets approved later contributes 2 runs (ingest + resume) to these totals,
+    not 1, since each is a real invocation with its own cost/latency."""
+    total_conversations: int = Field(..., description="Distinct tickets ever ingested via POST /tickets.")
+    total_runs: int = Field(..., description="Every graph invocation across every conversation -- "
+                                               "ingests plus approve/reject resumes.")
+    total_tokens: int = Field(..., description="Real token usage summed across every run, service-wide.")
+    total_cost_usd: float = Field(..., description="Priced from total_tokens against MODEL_PRICES_USD_PER_1K.")
+    avg_latency_ms: float = Field(..., description="Average wall-clock duration per run, service-wide.")
+    action_breakdown: dict[str, int] = Field(..., description="Final decision.action, counted per run -- "
+                                                                 "e.g. {'auto_respond': 3, 'escalate_to_human': 2}.")
+    urgency_breakdown: dict[str, int] = Field(..., description="Final decision.urgency, counted per run -- "
+                                                                  "e.g. {'critical': 2, 'low': 3}.")
+    tool_call_status_breakdown: dict[str, int] = Field(..., description="Current status of every tool call ever "
+                                                                          "proposed, service-wide -- e.g. "
+                                                                          "{'pending_approval': 1, 'executed': 4}.")
+    timeseries: list[TimeseriesPoint] = Field(..., description="Requests/tokens per hour, for the dashboard's graph.")

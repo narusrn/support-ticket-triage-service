@@ -59,6 +59,22 @@ Then pull the full audit trail:
 curl http://127.0.0.1:8000/api/v1/conversations/{conversation_id}
 ```
 
+`messages` also accepts a plain string instead of a list, and the whole request can
+just be a raw `text/plain` body (no JSON at all) -- `customer_metadata` is then left
+for the classifier to infer from the text itself.
+
+## Metrics dashboard
+
+```
+http://127.0.0.1:8000/api/v1/dashboard
+```
+
+A small charts-and-stat-tiles page (Chart.js via CDN, no build step) showing
+requests/tokens/cost over time plus action/urgency/tool-call breakdowns, rolled up
+across every conversation. The page itself needs no key (a browser navigation can't
+send a custom header), but type your `API_KEY` into its field to load data -- it's
+just calling `GET /api/v1/metrics`, which is gated like every other endpoint.
+
 ## Terminal client
 
 `scripts/chat.py` is a thin REPL over the same endpoints above -- convenient for

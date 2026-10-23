@@ -27,7 +27,24 @@ router = APIRouter()
         "- `Content-Type: text/plain` -- no JSON wrapping at all, the body IS the ticket text. "
         "`customer_metadata` is then left for the classifier to infer from the text itself."
     ),
-    responses={422: {"model": ErrorResponse, "description": "Validation failed, e.g. an empty messages list."}},
+    responses={
+        422: {"model": ErrorResponse, "description": "Validation failed, e.g. an empty messages list."},
+        201: {"content": {"application/json": {"example": {
+            "conversation_id": "c_a1b2c3d4", "status": "awaiting_approval",
+            "decision": {
+                "urgency": "critical", "action": "escalate_to_human", "confidence": 0.9,
+                "extracted": {"product_area": "billing", "issue_type": "duplicate_charge",
+                               "sentiment": "angry", "language": "en", "confidence": 0.9,
+                               "rationale": "3 distinct charges in 2 hours, none refunded"},
+                "draft_reply": None, "rationale": "Multiple unrefunded charges need human review before a refund.",
+                "cited_kb_doc_ids": [],
+                "tool_calls": [{"tool_call_id": "tc_a30ebab79e", "tool_name": "issue_refund",
+                                  "args": {"charge_ids": ["ch_1", "ch_2", "ch_3"], "amount_usd": 89.97},
+                                  "status": "pending_approval", "reason": None, "result": None}],
+            },
+            "reply": None,
+        }}}},
+    },
     # Found live: once this handler stopped taking `body: TicketIngestRequest` as a typed
     # parameter (needed to read the raw body for the text/plain branch below), Swagger UI
     # lost the editable request-body box entirely -- it had nothing to generate one from.
