@@ -25,15 +25,28 @@ _VALID_CLASSIFICATION = {
 }
 
 
-def _mock_route_fn(state):
-    if state.get("extracted") is None:
-        return {"next": "triage_classifier", "reason": "new ticket"}
-    if state.get("decision") is not None:
-        return {"next": "end", "reason": "already decided"}
-    return {"next": "action_decider", "reason": "test fixture"}
+class _FakeResponse:
+    def __init__(self, tool_calls=None, content=""):
+        self.tool_calls = tool_calls or []
+        self.content = content
 
 
-def _mock_decide_with_refund(state):
+def _handoff_call(next_: str, reason: str = "test fixture"):
+    return {"name": "HandoffTool", "args": {"next": next_, "reason": reason}, "id": "call_1"}
+
+
+class _FakeSupervisorLLM:
+    """Mirrors the old route_fn's logic (classify first, then decide) by inspecting the
+    conversation text instead of raw state -- a real supervisor_llm only ever sees the
+    LangChain message list, not the state dict."""
+    def invoke(self, messages):
+        texts = " ".join(getattr(m, "content", "") or "" for m in messages)
+        if "Triage Classifier:" not in texts:
+            return _FakeResponse([_handoff_call("triage_classifier")])
+        return _FakeResponse([_handoff_call("action_decider")])
+
+
+def _mock_decide_with_refund(state, messages):
     return {"action": "escalate_to_human", "rationale": "needs approval", "confidence": 0.9,
             "cited_kb_doc_ids": [], "draft_reply": None,
             "pending_tool": {"tool_name": "issue_refund", "args": {"charge_ids": ["ch_1"], "amount_usd": 89.97}}}
@@ -65,8 +78,8 @@ def test_chatbot_script_end_to_end_ingest_consult_approve(tmp_path, monkeypatch,
     monkeypatch.setattr(settings, "DATABASE_PATH", str(tmp_path / "chatbot_e2e.db"))
     monkeypatch.setattr(settings, "LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.setattr(settings, "API_KEY", "")
-    monkeypatch.setattr(orchestrator_module, "_default_classify_fn", lambda state: _VALID_CLASSIFICATION)
-    monkeypatch.setattr(orchestrator_module, "_default_route_fn", _mock_route_fn)
+    monkeypatch.setattr(orchestrator_module, "_default_classify_fn", lambda state, messages: _VALID_CLASSIFICATION)
+    monkeypatch.setattr(orchestrator_module, "_default_supervisor_llm", lambda: _FakeSupervisorLLM())
     monkeypatch.setattr(orchestrator_module, "_default_decide_fn", _mock_decide_with_refund)
 
     from api.main import app

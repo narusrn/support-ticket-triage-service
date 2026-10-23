@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Message(BaseModel):
@@ -19,8 +19,23 @@ class CustomerMetadata(BaseModel):
 
 
 class TicketIngestRequest(BaseModel):
-    messages: list[Message] = Field(..., min_length=1, description="The full thread exactly as it already existed before this system saw it.")
+    messages: list[Message] = Field(
+        ..., min_length=1,
+        description="The full thread exactly as it already existed before this system saw it -- "
+                    "either a list of {role, content} messages, or a single plain-text string "
+                    "(e.g. a raw pasted email/chat thread), treated as one customer message."
+    )
     customer_metadata: CustomerMetadata
+
+    @field_validator("messages", mode="before")
+    @classmethod
+    def _coerce_plain_text(cls, value):
+        # scripts/chat.py --paste already does this client-side (wraps raw pasted text
+        # into one {"role": "customer", "content": ...} message before POSTing) -- moved
+        # into the schema itself so any caller can just send a string, not only that script.
+        if isinstance(value, str):
+            return [{"role": "customer", "content": value}]
+        return value
 
     model_config = ConfigDict(json_schema_extra={
         "example": {

@@ -23,25 +23,27 @@ without touching the others — e.g. swapping SQLite for Postgres only touches
 
 ```mermaid
 flowchart TD
-    START((START)) --> SUP["supervisor\n(context-trim check, MAX_STEPS check,\nthen route_fn decides EVERY turn)"]
+    START((START)) --> SUP["supervisor\n(context-trim check, MAX_STEPS check,\nthen calls HandoffTool EVERY turn)"]
     SUP -- "triage_classifier" --> CTC[call_triage_classifier] --> SUP
     SUP -- "kb_retriever" --> CKB[call_kb_retriever] --> SUP
     SUP -- "action_decider" --> CAD[call_action_decider]
     SUP -- "direct_reply (not a ticket)" --> END1((END))
     SUP -- "force_escalate (MAX_STEPS hit)" --> FE[force_escalate] --> END2((END))
-    CAD -- "no side-effecting tool requested" --> END3((END))
+    SUP -- "decision already set\n(reports back here from CAD/AWT)" --> END5((END))
+    CAD -- "no side-effecting tool requested" --> SUP
     CAD -- "issue_refund / open_incident_or_page_oncall requested" --> AWT["await_tool_approval:\npersist pending_approval row, then interrupt()\n-- graph SUSPENDS, not END"]
     AWT -. "Command(resume=...) via /approve or /reject,\nseconds-to-days later, even after a restart" .-> AWT
-    AWT --> END4((END))
+    AWT --> SUP
 ```
 
-The supervisor is a **structured-output router**, not a tool-calling agent: every
-turn it calls an LLM constrained to a `RouteDecision` Pydantic schema
-(`next: triage_classifier | kb_retriever | action_decider | direct_reply | end`),
-and the orchestrator reads `next` directly off a conditional edge. This was a
-deliberate change from an earlier `handoff_to_agent`-tool-call design — tool-calling
-routing adds a layer of indirection (parse the tool call, map its args back to a
-destination) for no benefit when the destination set is small and fixed.
+The supervisor is a **ReAct-style, tool-calling agent**: every turn it calls an LLM
+bound to a single `HandoffTool` function (`next: triage_classifier | kb_retriever |
+action_decider | direct_reply | end`) and the orchestrator reads `Command(goto=...)`
+straight off the model's tool call. This replaced an earlier structured-output
+router (the supervisor returned a plain `RouteDecision` object instead of calling a
+tool) that shipped first and was swapped out after hands-on testing — see "Why a
+tool-calling supervisor, not structured output" below for exactly what that testing
+found and fixed.
 
 It also decides on **every** turn, including the first — not hardcoded to always
 classify first. A plain "hi, who are you?" gets answered directly (`direct_reply`)
@@ -49,21 +51,65 @@ without ever entering `triage_classifier`; a live outage skips `kb_retriever`
 entirely. This came from a direct critique during build/review: hardcoding "classify
 first" would make the supervisor a router in name only. The one thing hardcoded in
 code, not left to the prompt, is a safety net: if the model ever tries to route to
-`action_decider` before `extracted` is set (observed live, twice, against the real
-model), the orchestrator overrides it back to `triage_classifier` rather than letting
-`action_decider` produce a `Decision` missing a required field.
+`action_decider` before `extracted` is set (observed live, repeatedly, against the
+real model), the orchestrator overrides it back to `triage_classifier` rather than
+letting `action_decider` produce a `Decision` missing a required field.
 
-### Why LangGraph `StateGraph`, not a single ReAct agent
+`action_decider` and `await_tool_approval` both route back to the **supervisor**,
+not straight to `END`, same as every other specialist — the supervisor's own
+`decision is not None` check then ends the run (no extra LLM call on that path, it's
+a fast-path check before the model is ever invoked). `force_escalate` is the one
+deliberate exception, wired straight to `END`: the supervisor's `MAX_STEPS` check
+runs *before* its decision check, so routing `force_escalate` back through the
+supervisor would just re-trigger it forever instead of ending.
 
-Built and ran both, side by side, on the same scenario (a ticket that plausibly
-needs *two* side-effecting tools at once). The ReAct agent called both tools in the
-same turn and — because tool results were being written into a shared dict by key —
-one result silently overwrote slots meant for the other. The `StateGraph` design
-makes that class of bug structurally impossible: `pending_tool` is a single
-`Optional[dict]` field, so there is no way for two side-effecting calls to be
-in flight at once, and the human-approval gate (`await_tool_approval`) sits on every
-path into a side-effecting tool, not inside a tool implementation where a future
-edit could accidentally skip it.
+### Why a tool-calling supervisor, not structured output
+
+The original build tried a ReAct/tool-calling supervisor first and dropped it after
+finding a real concurrency bug: on a ticket that plausibly needed *two*
+side-effecting tools at once, the model called both tools in the same turn, and
+because tool results were written into a shared state dict by key, one result
+silently overwrote the other. Structured output (one `RouteDecision` per turn, no
+tool-calling at all) made that class of bug structurally impossible and shipped as
+the production design.
+
+Later, on request, the tool-calling design was rebuilt as a side-by-side experiment
+and tested hands-on against the real model across every sample ticket, both
+languages, and the prompt-injection edge case. That testing found and fixed four
+more bugs (all four are also covered by regression tests in `tests/test_orchestrator.py`):
+
+1. **`kb_retriever` never reported back to the supervisor.** Every turn after it ran
+   looked identical to the first ("still an unanswered FAQ question"), so the
+   supervisor kept re-handing-off to `kb_retriever` until `MAX_STEPS` forced an
+   escalation, instead of moving on to `action_decider`.
+2. **A "narrated handoff."** Mid-pipeline, the model sometimes described its next
+   move in plain text ("I'm now handing this to Action Decider...") instead of
+   actually calling `HandoffTool`. Trusting that content as a `direct_reply` would
+   have put the narration straight in front of the customer as `draft_reply`.
+3. **A required field with no default crashed validation and discarded a real
+   decision.** `HandoffTool.reason` was required; the model sometimes omitted it,
+   `model_validate()` failed, and the except-branch threw away the model's actual
+   (and otherwise valid) `next="direct_reply"` choice, routing a plain greeting into
+   the ticket pipeline instead of answering it directly.
+4. **`action_decider`/`await_tool_approval` never reported back to the supervisor
+   at all** — the exact gap closed above, the only two nodes in the graph that
+   didn't follow the "every specialist reports back" rule everyone else does.
+
+With all four fixed, the original concurrency risk was re-addressed in code, not
+just in the prompt: `_single_tool_call()` keeps only the first tool call if the
+model ever emits more than one in a turn, and logs the drop as a
+`multiple_tool_calls_dropped` trace event. The prompt also tells the model to call
+`HandoffTool` at most once per turn, but that instruction is not trusted alone —
+the same lesson that motivated dropping the design the first time. With both the
+guard and the four bug fixes in place, this became the production design, replacing
+the structured-output router.
+
+One more deliberate choice that rode along with this change: the graph's own
+dialogue (`Supervisor: ...`, `Triage Classifier: ...`, etc., written by `_say()`)
+and the API-facing `Decision.rationale` field are both written in the **customer's
+own language**, not forced into English — confirmed live on the Thai outage ticket.
+`kb_retriever` isn't an LLM call, so it can't just be told to match language; a
+small `en`/`th` phrase table covers the two languages this project actually tests.
 
 ## 2. Autonomy boundary — enforced in code, not prompted
 
@@ -105,21 +151,29 @@ with an honest `rationale`, not a crash:
 
 ## 4. Testing & eval
 
-- **77 pytest tests**, LLM calls mocked at the brain-function boundary
-  (`classify_fn`/`decide_fn`/`route_fn` are injectable into `build_graph()`) — no
-  network call, no API key needed. Covers routing order, the approval gate, context
-  trimming, loop-guard, schema-retry fallback, idempotent approve/reject, and API
-  contract/error-shape.
+- **97 pytest tests**, LLM calls mocked at the brain-function boundary
+  (`classify_fn`/`decide_fn`/`supervisor_llm` are injectable into `build_graph()`) —
+  no network call, no API key needed. Covers routing order, the single-tool-call
+  guard, the approval gate, context trimming, loop-guard, schema-retry fallback,
+  idempotent approve/reject, and API contract/error-shape — including a direct
+  regression test for each of the four bugs described above.
 - **`eval/run_eval.py`** runs the *real* agent (real OpenAI calls) over 5 labeled
   tickets (3 realistic + 2 synthetic edge cases: a bare greeting, and the
-  prompt-injection case above). Last real run:
+  prompt-injection case above). Last real run, against the tool-calling supervisor:
   - **100%** on action choice, tool selection, KB-retriever routing, and language
     detection (including correctly detecting Thai against an English-only FAQ corpus).
-  - **60%** on exact urgency match — both misses were `critical` vs. `high` on
-    genuinely borderline tickets. This reads as real calibration noise in the
-    classifier, not a logic bug; a stricter rubric in `triage_classifier.md` would be
-    the next thing to try if this mattered for production.
-  - Autonomy boundary held on the injection ticket, as above.
+  - **60%** on exact urgency match — misses were `ticket_3_dark_mode` (`low` vs.
+    `medium`) and the injection ticket (`medium` vs. `high`), both genuinely
+    borderline calls. This reads as real calibration noise in the classifier, not a
+    logic bug, and matches the same 60% the structured-output router scored before
+    this change — the supervisor mechanism swap didn't move this number either way.
+    A stricter rubric in `triage_classifier.md` would be the next thing to try if
+    this mattered for production.
+  - Autonomy boundary held on the injection ticket, as above — still true under the
+    tool-calling supervisor, including the one real risk that design reintroduces
+    (a model emitting two tool calls in one turn): `_single_tool_call()` never
+    triggered during this run, but the guard and its trace event are tested directly
+    in `tests/test_orchestrator.py`, not just assumed safe.
   - Caught one real harness bug while building this: the LLM-as-judge pass was
     scoring the greeting's reply for "groundedness" even though it's a synthetic
     `direct_reply` decision that never cites any KB doc — fixed by only judging
@@ -170,13 +224,22 @@ internal `"[node] ..."` narration lines so only real conversational turns count.
 Verified live: a follow-up that only made sense in light of an earlier answer ("multiply
 that price by 12") was answered correctly without the number being restated.
 
+A fourth round of fixes came from swapping the supervisor's own decision mechanism
+from structured output to tool-calling (see "Why a tool-calling supervisor, not
+structured output" in Section 1) — four bugs found the same way as the ones above,
+by running the real agent against every sample ticket and both languages, not just
+by unit testing: the `kb_retriever` report-back gap, the narrated-handoff fallback,
+the missing-`reason`-field validation crash, and `action_decider`/
+`await_tool_approval` never reporting back to the supervisor. Each has its own
+regression test in `tests/test_orchestrator.py`.
+
 ## 7. If this were going to production
 
 - Swap the static `MODEL_PRICES_USD_PER_1K` table for live usage from the OpenAI
   response (`usage.total_tokens` is currently always 0 — the token/cost accounting
   plumbing exists in `runs`/`trace_events` but nothing populates it yet, since the
   default LLM clients don't thread `response.usage_metadata` back through
-  `_default_classify_fn`/`_default_decide_fn`/`_default_route_fn`).
+  `_default_classify_fn`/`_default_decide_fn`/`_default_supervisor_llm`).
   - Add real request-level rate limiting and per-customer (not just per-deployment)
     API keys.
   - Swap SQLite for Postgres under concurrent write load — the schema already

@@ -10,21 +10,34 @@ VALID_CLASSIFICATION = {
 }
 
 
-def _mock_route_fn(state):
-    if state.get("extracted") is None:
-        return {"next": "triage_classifier", "reason": "new ticket"}
-    if state.get("decision") is not None:
-        return {"next": "end", "reason": "already decided"}
-    return {"next": "action_decider", "reason": "test fixture"}
+class _FakeResponse:
+    def __init__(self, tool_calls=None, content=""):
+        self.tool_calls = tool_calls or []
+        self.content = content
 
 
-def _mock_decide_with_refund(state):
+def _handoff_call(next_: str, reason: str = "test fixture"):
+    return {"name": "HandoffTool", "args": {"next": next_, "reason": reason}, "id": "call_1"}
+
+
+class _FakeSupervisorLLM:
+    """Mirrors the old route_fn's logic (classify first, then decide) by inspecting the
+    conversation text instead of raw state -- a real supervisor_llm only ever sees the
+    LangChain message list, not the state dict."""
+    def invoke(self, messages):
+        texts = " ".join(getattr(m, "content", "") or "" for m in messages)
+        if "Triage Classifier:" not in texts:
+            return _FakeResponse([_handoff_call("triage_classifier")])
+        return _FakeResponse([_handoff_call("action_decider")])
+
+
+def _mock_decide_with_refund(state, messages):
     return {"action": "escalate_to_human", "rationale": "needs approval", "confidence": 0.9,
             "cited_kb_doc_ids": [], "draft_reply": None,
             "pending_tool": {"tool_name": "issue_refund", "args": {"charge_ids": ["ch_1"], "amount_usd": 89.97}}}
 
 
-def _mock_decide_auto_respond(state):
+def _mock_decide_auto_respond(state, messages):
     return {"action": "auto_respond", "rationale": "FAQ answers this", "confidence": 0.9,
             "cited_kb_doc_ids": ["faq_dark_mode"], "draft_reply": "Dark mode is on the roadmap.",
             "pending_tool": None}
@@ -35,8 +48,8 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "DATABASE_PATH", str(tmp_path / "test.db"))
     monkeypatch.setattr(settings, "LOG_DIR", str(tmp_path / "logs"))
     monkeypatch.setattr(settings, "API_KEY", "")  # auth disabled for the tests that aren't about auth itself
-    monkeypatch.setattr(orchestrator_module, "_default_classify_fn", lambda state: VALID_CLASSIFICATION)
-    monkeypatch.setattr(orchestrator_module, "_default_route_fn", _mock_route_fn)
+    monkeypatch.setattr(orchestrator_module, "_default_classify_fn", lambda state, messages: VALID_CLASSIFICATION)
+    monkeypatch.setattr(orchestrator_module, "_default_supervisor_llm", lambda: _FakeSupervisorLLM())
     monkeypatch.setattr(orchestrator_module, "_default_decide_fn", _mock_decide_with_refund)
 
     from api.main import app
@@ -60,6 +73,27 @@ def test_ingest_ticket_returns_201_with_pending_approval(client):
     assert body["status"] == "awaiting_approval"
     assert body["decision"]["action"] == "escalate_to_human"
     assert body["decision"]["tool_calls"][0]["status"] == "pending_approval"
+
+
+def test_ingest_ticket_accepts_a_raw_text_plain_body_with_no_json_at_all(client):
+    """On request: no JSON wrapping ceremony required at all -- POST the ticket text
+    itself with Content-Type: text/plain and it's treated as one customer message,
+    customer_metadata left for the classifier to infer from the text."""
+    response = client.post(
+        "/api/v1/tickets",
+        content="My payment failed, now I see three charges.",
+        headers={"Content-Type": "text/plain"},
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "awaiting_approval"
+    assert body["decision"]["action"] == "escalate_to_human"
+
+
+def test_ingest_ticket_rejects_an_empty_text_plain_body(client):
+    response = client.post("/api/v1/tickets", content="", headers={"Content-Type": "text/plain"})
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
 
 
 def test_ingest_ticket_rejects_empty_messages_with_422_and_error_shape(client):
@@ -164,8 +198,8 @@ def test_ticket_with_no_pending_tool_completes_immediately(tmp_path, monkeypatch
     monkeypatch.setattr(settings, "DATABASE_PATH", str(tmp_path / "test2.db"))
     monkeypatch.setattr(settings, "LOG_DIR", str(tmp_path / "logs2"))
     monkeypatch.setattr(settings, "API_KEY", "")
-    monkeypatch.setattr(orchestrator_module, "_default_classify_fn", lambda state: VALID_CLASSIFICATION)
-    monkeypatch.setattr(orchestrator_module, "_default_route_fn", _mock_route_fn)
+    monkeypatch.setattr(orchestrator_module, "_default_classify_fn", lambda state, messages: VALID_CLASSIFICATION)
+    monkeypatch.setattr(orchestrator_module, "_default_supervisor_llm", lambda: _FakeSupervisorLLM())
     monkeypatch.setattr(orchestrator_module, "_default_decide_fn", _mock_decide_auto_respond)
 
     from api.main import app
@@ -187,8 +221,8 @@ def secured_client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "DATABASE_PATH", str(tmp_path / "secured.db"))
     monkeypatch.setattr(settings, "LOG_DIR", str(tmp_path / "logs3"))
     monkeypatch.setattr(settings, "API_KEY", "test-secret-key")
-    monkeypatch.setattr(orchestrator_module, "_default_classify_fn", lambda state: VALID_CLASSIFICATION)
-    monkeypatch.setattr(orchestrator_module, "_default_route_fn", _mock_route_fn)
+    monkeypatch.setattr(orchestrator_module, "_default_classify_fn", lambda state, messages: VALID_CLASSIFICATION)
+    monkeypatch.setattr(orchestrator_module, "_default_supervisor_llm", lambda: _FakeSupervisorLLM())
     monkeypatch.setattr(orchestrator_module, "_default_decide_fn", _mock_decide_auto_respond)
 
     from api.main import app

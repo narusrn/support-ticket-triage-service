@@ -91,6 +91,21 @@ def test_ticket_ingest_request_rejects_empty_messages_list():
         TicketIngestRequest(messages=[], customer_metadata=CustomerMetadata(plan="free", tenure_months=1))
 
 
+def test_ticket_ingest_request_accepts_a_plain_text_string():
+    """On request: a caller can POST messages as a single plain-text string -- a raw
+    pasted thread -- instead of structuring it into a list of {role, content} objects."""
+    req = TicketIngestRequest(messages="Hi, my payment failed and I was charged twice.",
+                               customer_metadata=CustomerMetadata(plan="free", tenure_months=1))
+    assert len(req.messages) == 1
+    assert req.messages[0].role == "customer"
+    assert req.messages[0].content == "Hi, my payment failed and I was charged twice."
+
+
+def test_ticket_ingest_request_rejects_an_empty_plain_text_string():
+    with pytest.raises(ValidationError):
+        TicketIngestRequest(messages="", customer_metadata=CustomerMetadata(plan="free", tenure_months=1))
+
+
 def test_customer_metadata_rejects_negative_tenure():
     with pytest.raises(ValidationError):
         CustomerMetadata(plan="free", tenure_months=-1)

@@ -15,7 +15,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.types import Command
 
 from agents.llm import call_with_retry, get_supervisor_prompt, make_llm_client
-from agents.orchestrator import build_graph
+from agents.orchestrator import _DIALOGUE_SPEAKERS, build_graph
 from config import settings
 from storage import db
 
@@ -25,10 +25,12 @@ def _iso(ts: float) -> str:
 
 
 def _is_narration(message: dict) -> bool:
-    """Internal audit lines the graph appends (handoffs, status, tool outcomes) all
-    follow the "[node] ..." convention -- not something the model actually said in
-    conversation, so they're excluded when rebuilding advisory chat history below."""
-    return message["role"] == "agent" and message["content"].startswith("[")
+    """Internal audit lines the graph appends (handoffs, status, tool outcomes) are all
+    phrased as "Speaker: sentence" dialogue (see agents.orchestrator._say()) -- not
+    something the model actually said in conversation, so they're excluded when
+    rebuilding advisory chat history below. A genuine direct_reply answer has no
+    speaker prefix at all (it IS the answer), so it's never mistaken for narration."""
+    return message["role"] == "agent" and message["content"].split(": ", 1)[0] in _DIALOGUE_SPEAKERS
 
 
 def _default_advisory_reply(state: dict, history: list[dict], message_text: str) -> str:
@@ -70,13 +72,13 @@ class Runner:
         checkpointer: BaseCheckpointSaver,
         classify_fn: Optional[Callable] = None,
         decide_fn: Optional[Callable] = None,
-        route_fn: Optional[Callable] = None,
         summarize_fn: Optional[Callable] = None,
+        supervisor_llm=None,
         advisory_fn: Callable[[dict, list[dict], str], str] = _default_advisory_reply,
     ):
         self.conn = conn
         self.graph = build_graph(conn, checkpointer, classify_fn=classify_fn, decide_fn=decide_fn,
-                                  route_fn=route_fn, summarize_fn=summarize_fn)
+                                  summarize_fn=summarize_fn, supervisor_llm=supervisor_llm)
         self.advisory_fn = advisory_fn
 
     # --- public API ---
@@ -87,10 +89,18 @@ class Runner:
             db.insert_message(self.conn, conversation_id, m["role"], m["content"], m.get("sent_at"))
 
         # customer_metadata matters for triage (per spec) but was previously only ever
-        # written to storage.db -- never visible to classify_fn/decide_fn/route_fn, since
-        # those all build their prompt from state["messages"] alone. A second system
-        # message surfaces it the same way the main system prompt does.
-        metadata_line = ", ".join(f"{k}={v}" for k, v in customer_metadata.items())
+        # written to storage.db -- never visible to classify_fn/decide_fn/supervisor_llm,
+        # since those all build their prompt from state["messages"] alone. A second
+        # system message surfaces it the same way the main system prompt does.
+        if customer_metadata:
+            metadata_line = ", ".join(f"{k}={v}" for k, v in customer_metadata.items())
+        else:
+            # the text/plain ingest path (no JSON wrapping at all) and scripts/react_playground.py's
+            # --paste flow both skip asking for plan/tenure/prior_tickets up front -- triage_classifier.md
+            # already says to weigh those signals when present, so just tell it to pull them
+            # straight out of the thread text itself rather than leaving them unweighed.
+            metadata_line = ("not provided -- infer plan/tenure/prior-ticket signals from the "
+                              "thread text itself if the customer mentions them, otherwise treat as unknown")
         initial_state = {
             "conversation_id": conversation_id,
             "messages": [
@@ -98,7 +108,7 @@ class Runner:
                 {"role": "system", "content": f"Customer metadata: {metadata_line}"},
             ] + [{"role": m["role"], "content": m["content"]} for m in messages],
             "urgency": None, "extracted": None, "kb_results": None, "decision": None,
-            "pending_tool": None, "tool_calls": [], "step": 0, "trace": [], "next_hop": None,
+            "pending_tool": None, "tool_calls": [], "step": 0, "trace": [],
         }
         config = {"configurable": {"thread_id": conversation_id}}
         started = time.time()

@@ -10,64 +10,78 @@ MESSAGES = [
 ]
 
 
-def _classify_billing(state):
+def _classify_billing(state, messages):
     return {"product_area": "billing", "issue_type": "duplicate_charge", "sentiment": "angry",
             "language": "en", "confidence": 0.9, "rationale": "3 charges", "urgency": "critical"}
 
 
-def _decide_with_refund(state):
+def _decide_with_refund(state, messages):
     return {"action": "escalate_to_human", "rationale": "needs approval", "confidence": 0.9,
             "cited_kb_doc_ids": [], "draft_reply": None,
             "pending_tool": {"tool_name": "issue_refund", "args": {"charge_ids": ["ch_1"], "amount_usd": 89.97}}}
 
 
-def _decide_auto_respond(state):
+def _decide_auto_respond(state, messages):
     return {"action": "auto_respond", "rationale": "FAQ answers this", "confidence": 0.9,
             "cited_kb_doc_ids": ["faq_dark_mode"], "draft_reply": "Dark mode is on the roadmap.",
             "pending_tool": None}
 
 
-def _route_to_action_decider(state):
-    if state.get("extracted") is None:
-        return {"next": "triage_classifier", "reason": "new ticket"}
-    if state.get("decision") is not None:
-        return {"next": "end", "reason": "already decided"}
-    return {"next": "action_decider", "reason": "test fixture"}
+class _FakeResponse:
+    def __init__(self, tool_calls=None, content=""):
+        self.tool_calls = tool_calls or []
+        self.content = content
+
+
+def _handoff_call(next_: str, reason: str = "test fixture"):
+    return {"name": "HandoffTool", "args": {"next": next_, "reason": reason}, "id": "call_1"}
+
+
+class _FakeSupervisorLLM:
+    """Mirrors the old route_fn's logic (classify first, then decide) by inspecting the
+    conversation text instead of raw state -- a real supervisor_llm only ever sees the
+    LangChain message list, not the state dict. Stateless, so one instance is reusable
+    across every test and every Runner it's handed to."""
+    def invoke(self, messages):
+        texts = " ".join(getattr(m, "content", "") or "" for m in messages)
+        if "Triage Classifier:" not in texts:
+            return _FakeResponse([_handoff_call("triage_classifier")])
+        return _FakeResponse([_handoff_call("action_decider")])
 
 
 def _runner(tmp_path, **brain_fns) -> Runner:
     db_path = str(tmp_path / "test.db")
     db.init_db(db_path)
     conn = db.get_connection(db_path)
+    brain_fns.setdefault("supervisor_llm", _FakeSupervisorLLM())
     return Runner(conn, InMemorySaver(), **brain_fns)
 
 
 async def test_customer_metadata_reaches_classify_fn(tmp_path):
     """Found live: customer_metadata was only ever written to storage.db, never visible to
-    the LLM -- classify_fn/decide_fn/route_fn all build their prompt purely from
+    the LLM -- classify_fn/decide_fn/supervisor_llm all build their prompt purely from
     state["messages"]. An enterprise ticket and a free-plan ticket with identical wording
     would have classified identically, contradicting the spec's "metadata matters" and the
     whole point of designing CustomerMetadata with plan/tenure/seats in the first place."""
-    seen_metadata_lines = []
+    seen_messages = []
 
-    def classify_fn(state):
-        seen_metadata_lines.append([m["content"] for m in state["messages"] if "plan=" in m["content"]])
+    def classify_fn(state, messages):
+        seen_messages.append(messages)
         return {"product_area": "billing", "issue_type": "x", "sentiment": "neutral",
                 "language": "en", "confidence": 0.9, "rationale": "x", "urgency": "low"}
 
-    runner = _runner(tmp_path, classify_fn=classify_fn, decide_fn=_decide_auto_respond,
-                      route_fn=_route_to_action_decider)
+    runner = _runner(tmp_path, classify_fn=classify_fn, decide_fn=_decide_auto_respond)
     await runner.ingest_ticket("c_meta", [{"role": "customer", "content": "test"}],
                                 {"plan": "enterprise", "tenure_months": 8, "seats": 45})
 
-    assert len(seen_metadata_lines) == 1
-    assert "plan=enterprise" in seen_metadata_lines[0][0]
-    assert "seats=45" in seen_metadata_lines[0][0]
+    assert len(seen_messages) == 1
+    thread_text = seen_messages[0][-1]["content"]  # the explicit "messages" param's user message
+    assert "plan=enterprise" in thread_text
+    assert "seats=45" in thread_text
 
 
 async def test_ingest_ticket_persists_conversation_messages_and_decision(tmp_path):
-    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_with_refund,
-                      route_fn=_route_to_action_decider)
+    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_with_refund)
 
     result = await runner.ingest_ticket("c_1", MESSAGES, {"plan": "free", "tenure_months": 4})
 
@@ -79,15 +93,14 @@ async def test_ingest_ticket_persists_conversation_messages_and_decision(tmp_pat
     stored_messages = db.get_messages(runner.conn, "c_1")
     # 2 original customer messages + the graph's own handoff/status narrative, now synced
     assert [m["content"] for m in stored_messages[:2]] == [m["content"] for m in MESSAGES]
-    assert any(m["content"].startswith("[triage_classifier]") for m in stored_messages)
-    assert any(m["content"].startswith("[action_decider]") for m in stored_messages)
+    assert any(m["content"].startswith("Triage Classifier:") for m in stored_messages)
+    assert any(m["content"].startswith("Action Decider:") for m in stored_messages)
     stored_conv = db.get_conversation(runner.conn, "c_1")
     assert stored_conv["status"] == "awaiting_approval"
 
 
 async def test_ingest_ticket_no_pending_tool_is_immediately_completed(tmp_path):
-    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_auto_respond,
-                      route_fn=_route_to_action_decider)
+    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_auto_respond)
 
     result = await runner.ingest_ticket("c_2", MESSAGES, {"plan": "pro", "tenure_months": 5})
 
@@ -96,8 +109,7 @@ async def test_ingest_ticket_no_pending_tool_is_immediately_completed(tmp_path):
 
 
 async def test_approve_executes_tool_and_marks_completed(tmp_path):
-    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_with_refund,
-                      route_fn=_route_to_action_decider)
+    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_with_refund)
     ingested = await runner.ingest_ticket("c_3", MESSAGES, {})
     tool_call_id = ingested["decision"]["tool_calls"][0]["tool_call_id"]
 
@@ -112,8 +124,7 @@ async def test_approve_executes_tool_and_marks_completed(tmp_path):
 
 
 async def test_approve_twice_is_idempotent_second_call_is_replayed(tmp_path):
-    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_with_refund,
-                      route_fn=_route_to_action_decider)
+    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_with_refund)
     ingested = await runner.ingest_ticket("c_4", MESSAGES, {})
     tool_call_id = ingested["decision"]["tool_calls"][0]["tool_call_id"]
 
@@ -128,8 +139,7 @@ async def test_approve_twice_is_idempotent_second_call_is_replayed(tmp_path):
 
 
 async def test_reject_never_executes(tmp_path):
-    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_with_refund,
-                      route_fn=_route_to_action_decider)
+    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_with_refund)
     ingested = await runner.ingest_ticket("c_5", MESSAGES, {})
     tool_call_id = ingested["decision"]["tool_calls"][0]["tool_call_id"]
 
@@ -140,8 +150,7 @@ async def test_reject_never_executes(tmp_path):
 
 
 async def test_send_message_on_decided_conversation_uses_advisory_path(tmp_path):
-    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_auto_respond,
-                      route_fn=_route_to_action_decider)
+    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_auto_respond)
     await runner.ingest_ticket("c_6", MESSAGES, {})
 
     advisory_calls = []
@@ -170,8 +179,7 @@ async def test_send_message_remembers_earlier_advisory_turns(tmp_path):
     told, because advisory turns never touched the graph's checkpoint. send_message()
     must hand the advisory_fn everything said so far (including its own prior replies),
     not just the ticket's original decision context."""
-    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_auto_respond,
-                      route_fn=_route_to_action_decider)
+    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_auto_respond)
     await runner.ingest_ticket("c_memory", MESSAGES, {})
 
     seen_histories = []
@@ -196,8 +204,7 @@ async def test_graph_message_sync_survives_an_advisory_message_in_between(tmp_pa
     into storage.db without ever touching the graph. If syncing were count-based instead of
     content-based, this advisory insert would throw off the count and the later approval's
     outcome message could get silently skipped."""
-    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_with_refund,
-                      route_fn=_route_to_action_decider)
+    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_with_refund)
     ingested = await runner.ingest_ticket("c_order", MESSAGES, {})
     tool_call_id = ingested["decision"]["tool_calls"][0]["tool_call_id"]
 
@@ -207,7 +214,7 @@ async def test_graph_message_sync_survives_an_advisory_message_in_between(tmp_pa
     stored = db.get_messages(runner.conn, "c_order")
     contents = [m["content"] for m in stored]
     assert "why is this urgent?" in contents  # the advisory operator turn
-    assert any(c.startswith("[System]") and "approved" in c for c in contents)  # the outcome message, not skipped
+    assert any(c.startswith("System:") and "approved" in c for c in contents)  # the outcome message, not skipped
     # no duplicates -- every (role, content) pair appears exactly once
     assert len(contents) == len(set((m["role"], m["content"]) for m in stored))
 
@@ -217,8 +224,7 @@ async def test_approve_does_not_insert_a_duplicate_decision_row(tmp_path):
     actual decision field (urgency/action/rationale/...) -- only the tool call's status.
     Without the dedup check, this would silently double the decisions table on every
     approve/reject."""
-    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_with_refund,
-                      route_fn=_route_to_action_decider)
+    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_with_refund)
     ingested = await runner.ingest_ticket("c_dedup", MESSAGES, {})
     tool_call_id = ingested["decision"]["tool_calls"][0]["tool_call_id"]
 
@@ -228,8 +234,7 @@ async def test_approve_does_not_insert_a_duplicate_decision_row(tmp_path):
 
 
 async def test_run_row_persisted_with_matching_trace_event_count(tmp_path):
-    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_auto_respond,
-                      route_fn=_route_to_action_decider)
+    runner = _runner(tmp_path, classify_fn=_classify_billing, decide_fn=_decide_auto_respond)
     await runner.ingest_ticket("c_7", MESSAGES, {})
 
     runs = db.get_runs(runner.conn, "c_7")
@@ -249,7 +254,7 @@ async def test_restart_survival_resume_works_with_a_fresh_runner_and_real_sqlite
 
     async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "checkpoint.sqlite")) as checkpointer1:
         runner1 = Runner(conn1, checkpointer1, classify_fn=_classify_billing, decide_fn=_decide_with_refund,
-                          route_fn=_route_to_action_decider)
+                          supervisor_llm=_FakeSupervisorLLM())
         ingested = await runner1.ingest_ticket("c_8", MESSAGES, {})
         tool_call_id = ingested["decision"]["tool_calls"][0]["tool_call_id"]
         assert ingested["status"] == "awaiting_approval"
@@ -258,7 +263,7 @@ async def test_restart_survival_resume_works_with_a_fresh_runner_and_real_sqlite
     conn2 = db.get_connection(db_path)  # reopen the same storage DB file
     async with AsyncSqliteSaver.from_conn_string(str(tmp_path / "checkpoint.sqlite")) as checkpointer2:
         runner2 = Runner(conn2, checkpointer2, classify_fn=_classify_billing, decide_fn=_decide_with_refund,
-                          route_fn=_route_to_action_decider)
+                          supervisor_llm=_FakeSupervisorLLM())
         result = await runner2.approve("c_8", tool_call_id, reason="verified after restart")
 
     assert result["status"] == "completed"
