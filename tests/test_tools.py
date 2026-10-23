@@ -12,11 +12,6 @@ def _setup(tmp_path):
     return conn
 
 
-def test_search_knowledge_base_returns_results():
-    results = tools.search_knowledge_base("dark mode toggle")
-    assert results[0]["doc_id"] == "faq_dark_mode"
-
-
 def test_dispatch_tool_call_executes_issue_refund_once(tmp_path):
     conn = _setup(tmp_path)
     db.insert_tool_call(conn, "tc_1", "c_1", "issue_refund", {"charge_ids": ["ch_1", "ch_2"], "amount_usd": 59.98},

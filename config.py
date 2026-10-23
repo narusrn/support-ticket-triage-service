@@ -9,6 +9,15 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-4o-mini"
     SUPERVISOR_MODEL: str = "gpt-4o-mini"
 
+    # agents/retriever.py's agentic RAG retriever -- embeddings + vector search +
+    # grade/rewrite retry loop, replacing the earlier TF-IDF search (agents/kb.py).
+    # "small", not "large": this corpus is ~9 short topics and queries are
+    # monolingual per ticket (no cross-lingual matching need the way a bilingual
+    # HR knowledge base would have), so the cheaper embedding model is plenty.
+    EMBEDDING_MODEL: str = "text-embedding-3-small"
+    RETRIEVER_TOP_K: int = 2
+    RETRIEVER_MAX_REWRITES: int = 1
+
     # API auth -- a single shared key via the X-API-Key header, not a user/account system.
     # Beyond the spec's minimum (it explicitly excludes auth), added on request. Empty = auth
     # disabled (dev convenience); set a real value to actually require the header.

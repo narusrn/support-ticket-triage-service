@@ -4,8 +4,8 @@ logic the API doesn't already have; api/routes/ remains the single source of
 truth for behavior.
 
 Usage:
-  python scripts/chat.py --ticket eval/labeled_tickets.json --ticket-id ticket_1_billing
   python scripts/chat.py --ticket my_ticket.json          # {"messages": [...], "customer_metadata": {...}}
+  python scripts/chat.py --ticket tickets.json --ticket-id ticket_1_billing  # a JSON list of tickets
   python scripts/chat.py --paste                          # paste a raw ticket thread interactively
   python scripts/chat.py --conversation-id c_abc12345      # resume an existing conversation
 
@@ -148,7 +148,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--base-url", default="http://127.0.0.1:8000/api/v1")
     parser.add_argument("--api-key", default=None, help="X-API-Key header; omit if the server has none configured")
-    parser.add_argument("--ticket", help="Path to a ticket JSON file (or a labeled_tickets.json-style list)")
+    parser.add_argument("--ticket", help="Path to a ticket JSON file (or a JSON list of tickets)")
     parser.add_argument("--ticket-id", help="Which entry to use, when --ticket points at a list of tickets")
     parser.add_argument("--paste", action="store_true", help="Paste a raw ticket thread interactively instead of loading a JSON file")
     parser.add_argument("--conversation-id", help="Resume an existing conversation instead of ingesting a new ticket")

@@ -24,7 +24,10 @@ _DASHBOARD_HTML = (Path(__file__).resolve().parent.parent / "static" / "dashboar
         "of scraping the HTML page.\n\n"
         "All totals are per **run** (one graph invocation), not per conversation -- "
         "approving a tool call resumes the graph, which is a second run with the same "
-        "`final_action`, so it's counted again here."
+        "`final_action`, so it's counted again here.\n\n"
+        "`timeseries` is bucketed per minute in Asia/Bangkok local time (UTC+7), not UTC -- "
+        "so the \"requests over time\" graph shows real movement during a normal testing "
+        "session instead of one flat hourly bar."
     ),
     responses={
         401: {"model": ErrorResponse},
@@ -34,7 +37,7 @@ _DASHBOARD_HTML = (Path(__file__).resolve().parent.parent / "static" / "dashboar
             "action_breakdown": {"auto_respond": 4, "escalate_to_human": 6, "route_to_specialist": 1},
             "urgency_breakdown": {"critical": 4, "medium": 5, "low": 2},
             "tool_call_status_breakdown": {"executed": 2, "rejected": 1},
-            "timeseries": [{"bucket": "2026-10-23T07:00:00", "runs": 11, "tokens": 61603}],
+            "timeseries": [{"bucket": "2026-10-23T16:22:00", "runs": 11, "tokens": 61603}],
         }}}},
     },
     dependencies=[Depends(verify_api_key)],

@@ -39,7 +39,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import Command, interrupt
 from pydantic import BaseModel, Field, ValidationError
 
-from agents import tools
+from agents import retriever, tools
 from agents.llm import LLMUnavailableError, call_with_retry, extract_usage, get_agents, get_supervisor_prompt, make_llm_client
 from api.schemas.decision import ExtractedInfo
 from config import settings
@@ -53,7 +53,9 @@ class GraphState(TypedDict):
     messages: list[dict]  # plain (replace) field -- context trim needs wholesale replacement, not append
     urgency: Optional[str]
     extracted: Optional[dict]
-    kb_results: Optional[list[dict]]
+    query: Optional[str]  # built by the kb_retriever node, shared-name with agents.retriever.py's
+                            # RetrieverState.query so LangGraph auto-transfers it into that embedded subgraph
+    kb_results: Optional[list[dict]]  # shared-name with RetrieverState.kb_results -- auto-transferred back out
     decision: Optional[dict]
     pending_tool: Optional[dict]
     tool_calls: Annotated[list[dict], operator.add]
@@ -339,11 +341,19 @@ def build_graph(
     decide_fn: Optional[Callable[[GraphState, list[dict]], dict]] = None,
     summarize_fn: Optional[Callable[[list[dict]], str]] = None,
     supervisor_llm=None,
+    retriever_graph=None,
 ):
     classify_fn = classify_fn or _default_classify_fn
     decide_fn = decide_fn or _default_decide_fn
     summarize_fn = summarize_fn or _default_summarize_fn
     llm = supervisor_llm or _default_supervisor_llm()
+    # defaults to agents.retriever's real compiled graph (embeddings + vector search +
+    # grade/rewrite loop), embedded directly as the "kb_retriever_search" node below --
+    # not called through a plain function -- so get_graph(xray=True) can expand it into
+    # its own box in the diagram, the same way the reference embeds its retriever_graph.
+    # Injectable the same way classify_fn/decide_fn are: tests pass
+    # retriever.build_stub_graph(fake_fn) so nothing here needs a real OpenAI embeddings call.
+    retriever_graph = retriever_graph or retriever._default_graph()
 
     def supervisor(state: GraphState) -> Command:
         step = state["step"] + 1
@@ -482,17 +492,29 @@ def build_graph(
                               model=usage.get("model") if usage else None, tokens=usage)],
         }
 
+    # kb_retriever is now a 3-node chain, not one function -- call_kb_retriever (below)
+    # builds the query, then control passes to "kb_retriever_search" (agents/retriever.py's
+    # compiled graph, embedded directly as that node -- see build_graph()'s retriever_graph
+    # param) via a static edge, then to after_kb_retriever (below) via another. Split this
+    # way, instead of one function calling retriever.retrieve() directly, specifically so
+    # get_graph(xray=True) can expand "kb_retriever_search" into its own box in the
+    # architecture diagram, the same way the reference project embeds its retriever graph.
+    # query/kb_results are shared-name fields with RetrieverState (see retriever.py's module
+    # docstring) -- LangGraph auto-transfers them into/out of the embedded subgraph, so
+    # neither node here has to pass them through by hand.
     def call_kb_retriever(state: GraphState) -> dict:
-        step = state["step"] + 1
         # Found live (golden-set tickets 6/7): using extracted["issue_type"] (a short
         # taxonomy tag like "feature_question") as the search query matched nothing in
-        # the FAQ corpus for anything but a lucky literal substring hit -- TF-IDF search
-        # needs the customer's own words, not a category label, to have any real chance
-        # of overlapping with the docs' vocabulary. "export my data as a CSV" scores
-        # 0.44 against faq_data_export; "feature_question" scores 0 against everything.
+        # the FAQ corpus for anything but a lucky literal substring hit -- vector/TF-IDF
+        # search alike need the customer's own words, not a category label, to have any
+        # real chance of matching the docs' vocabulary or embedding space.
         customer_text = " ".join(m["content"] for m in state["messages"] if m["role"] == "customer")
         query = customer_text or (state.get("extracted") or {}).get("issue_type", "")
-        results = tools.search_knowledge_base(query or "general question")
+        return {"query": query or "general question"}
+
+    def after_kb_retriever(state: GraphState) -> dict:
+        step = state["step"] + 1
+        results = state.get("kb_results") or []
         # Found live: without a status message here, the supervisor's only input is
         # state["messages"] -- so with no record that kb_retriever already ran, every
         # subsequent turn looked identical to the first ("still an unanswered FAQ
@@ -500,23 +522,25 @@ def build_graph(
         # an escalation. triage_classifier already reports back this way; kb_retriever
         # must too, for the same reason.
         #
-        # This is the one specialist that isn't an LLM call (search_knowledge_base is a
-        # plain keyword/TF-IDF search), so it can't just be told to match the customer's
-        # language the way the others are -- _KB_RETRIEVER_PHRASES covers the languages
-        # this project actually tests (en/th); anything else falls back to English.
+        # kb_retriever_search's own agentic loop (agents/retriever.py) already decides
+        # relevance and retries internally -- this node can't just tell IT to match the
+        # customer's language the way an LLM-call node can, so _KB_RETRIEVER_PHRASES covers
+        # the languages this project actually tests (en/th); anything else falls back to English.
         language = (state.get("extracted") or {}).get("language", "en")
         found, not_found = _KB_RETRIEVER_PHRASES.get(language, _KB_RETRIEVER_PHRASES["en"])
-        if results:
-            doc_list = ", ".join(r["doc_id"] for r in results)
-            status_message = _say("KB Retriever", found.format(n=len(results), docs=doc_list))
+        doc_ids = list(dict.fromkeys(r["doc_id"] for r in results))  # dedupe, preserve order --
+                                                                       # a topic split into >1 chunk
+                                                                       # can otherwise show up twice
+        if doc_ids:
+            doc_list = ", ".join(doc_ids)
+            status_message = _say("KB Retriever", found.format(n=len(doc_ids), docs=doc_list))
         else:
             status_message = _say("KB Retriever", not_found)
         return {
             "step": step,
-            "kb_results": results,
             "messages": state["messages"] + [status_message],
             "trace": [_trace(step, "call_kb_retriever", "tool_call",
-                              payload={"tool_name": "search_knowledge_base", "query": query, "results": results})],
+                              payload={"tool_name": "search_knowledge_base", "query": state.get("query"), "results": results})],
         }
 
     def call_action_decider(state: GraphState) -> dict:
@@ -639,13 +663,20 @@ def build_graph(
                     destinations=("triage_classifier", "kb_retriever", "action_decider", "force_escalate", END))
     graph.add_node("triage_classifier", call_triage_classifier)
     graph.add_node("kb_retriever", call_kb_retriever)
+    # retriever_graph embedded directly (not called from inside a function) -- see
+    # after_kb_retriever's comment above for why, and retriever.py's module docstring
+    # for how its internal state stays isolated from this graph's.
+    graph.add_node("kb_retriever_search", retriever_graph)
+    graph.add_node("after_kb_retriever", after_kb_retriever)
     graph.add_node("action_decider", call_action_decider)
     graph.add_node("force_escalate", force_escalate)
     graph.add_node("await_tool_approval", await_tool_approval)
 
     graph.set_entry_point("supervisor")
     graph.add_edge("triage_classifier", "supervisor")
-    graph.add_edge("kb_retriever", "supervisor")
+    graph.add_edge("kb_retriever", "kb_retriever_search")
+    graph.add_edge("kb_retriever_search", "after_kb_retriever")
+    graph.add_edge("after_kb_retriever", "supervisor")
     graph.add_conditional_edges("action_decider", _route_from_action_decider, {
         "await_tool_approval": "await_tool_approval",
         "supervisor": "supervisor",

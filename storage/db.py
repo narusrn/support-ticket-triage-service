@@ -345,8 +345,12 @@ def get_global_metrics(conn: sqlite3.Connection) -> dict:
         rows = conn.execute(f"SELECT {column} as k, COUNT(*) as n FROM {table} WHERE {column} IS NOT NULL GROUP BY {column}").fetchall()
         return {r["k"]: r["n"] for r in rows}
 
+    # started_at is stored UTC (agents/runner.py's _iso()) -- shifted +7h (Asia/Bangkok,
+    # no DST) and bucketed per-minute rather than per-hour so the "requests over time"
+    # graph actually shows movement during a normal testing/demo session instead of one
+    # flat hourly bar.
     timeseries = conn.execute(
-        "SELECT strftime('%Y-%m-%dT%H:00:00', started_at) as bucket, COUNT(*) as runs, "
+        "SELECT strftime('%Y-%m-%dT%H:%M:00', started_at, '+7 hours') as bucket, COUNT(*) as runs, "
         "COALESCE(SUM(json_extract(tokens, '$.total')), 0) as tokens "
         "FROM runs GROUP BY bucket ORDER BY bucket"
     ).fetchall()

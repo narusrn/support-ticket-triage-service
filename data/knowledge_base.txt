@@ -1,0 +1,113 @@
+# faq_account_access
+
+If you cannot log in, first confirm the issue isn't a service-wide outage (check
+the outage status topic) before troubleshooting your own account.
+
+Password resets are self-service via the "Forgot password" link on the login
+page. Reset links expire after 1 hour.
+
+Enterprise accounts with SSO configured should contact their organization's
+admin for access issues rather than using the standard password reset flow.
+
+# faq_billing_plans
+
+Free plan accounts can upgrade to Pro at any time from Settings > Billing. Pro
+unlocks export features, higher usage limits, and priority support.
+
+If an upgrade payment fails, your account stays on the Free plan and no charge
+should be captured. If you retried the upgrade after a failure, see the refund
+policy topic for how duplicate charges from retries are handled.
+
+Downgrading from Pro to Free takes effect at the end of the current billing
+cycle, not immediately.
+
+# faq_dark_mode
+
+Dark mode is currently in limited rollout. Go to Settings > Appearance to choose
+between Light and System Default. A dedicated Dark toggle is coming in a future
+release — there is no way to force dark mode independently of your OS theme yet.
+
+Known issue: on some Mac setups, selecting "System Default" does not immediately
+pick up a dark OS theme. Toggling back to Light and then to System Default again
+usually fixes it. A permanent fix is being tracked internally.
+
+Scheduled theme switching (e.g. auto-dark at a specific time) is not supported.
+
+# faq_data_export
+
+Pro plan accounts can export data as CSV or JSON from Settings > Export. Exports
+are generated asynchronously and emailed as a download link once ready, usually
+within a few minutes for most account sizes.
+
+Free plan accounts do not have access to export features. Upgrading to Pro
+unlocks export immediately, with no separate activation step required.
+
+# faq_outage_status
+
+Current system status is published at status.company.com. Note that the status
+page is updated by an on-call engineer and can lag behind reality by several
+minutes during a fast-moving incident — if you are seeing errors but the page
+says "all systems operational," the page may simply not have been updated yet.
+
+A 500 error on load typically indicates a backend service issue rather than a
+problem with your account or browser. Trying multiple browsers or devices and
+seeing the same result is a strong signal the issue is server-side, not local.
+
+Enterprise customers with an active incident affecting multiple seats should be
+escalated for a paged response rather than a standard support reply.
+
+# faq_refund_policy
+
+If you were charged more than once for the same upgrade attempt, this is usually
+caused by a payment retry after a failed authorization — the failed attempt's
+hold can still show as a pending charge on your bank statement for a few hours
+even though it was never actually captured.
+
+If multiple charges were genuinely captured (not just pending holds), each extra
+charge is eligible for a full refund. Refunds typically post back to the original
+payment method within 5-10 business days depending on the bank.
+
+Refunds above $50 or affecting more than one charge require manual review before
+being issued — they are not processed automatically.
+
+# faq_notification_settings
+
+Email and in-app notifications can be toggled independently from Settings >
+Notifications — turning off email digests does not disable in-app alerts, and
+vice versa.
+
+Weekly summary emails go out every Monday at 9am in the account's configured
+timezone. Changing your timezone takes effect on the following Monday, not
+immediately, since that week's digest may already be queued.
+
+Enterprise admins can set a notification policy that applies to every seat on
+the account; individual members can only loosen it (e.g. add channels), not
+turn off notifications their admin has marked mandatory.
+
+# faq_team_seat_management
+
+Enterprise and Pro-team accounts manage seats from Settings > Team. Adding a
+seat mid-cycle is prorated for the remainder of the current billing period;
+removing a seat does not refund the current period but stops billing for it
+starting next cycle.
+
+An invited member has 7 days to accept before the invite expires and the seat
+is released back to the available pool. Re-inviting the same email after
+expiry sends a fresh invite and consumes a seat again only once they accept.
+
+Transferring a seat from one person to another (e.g. an employee leaving) does
+not require removing and re-adding — use "Reassign seat" on the team member's
+row to keep their historical data attributed to the seat, not the person.
+
+# faq_mobile_app_login
+
+The mobile app uses the same credentials as the web app, but sessions are
+separate — logging out on web does not log you out on mobile, and vice versa.
+
+If a one-time code never arrives on mobile, check that notifications for the
+app aren't silenced at the OS level first; the code is also always visible by
+pulling down to refresh the login screen, not just via push notification.
+
+SSO-enabled enterprise accounts must complete the SSO login through the
+in-app browser the first time; after that, the mobile app can use a cached
+session without re-prompting SSO on every open.

@@ -1,5 +1,5 @@
 """Offline eval harness: runs the real agent (real OpenAI calls) over
-eval/labeled_tickets.json and reports per-field accuracy, plus an
+eval/golden_tickets.xlsx and reports per-field accuracy, plus an
 LLM-as-judge pass over any auto_respond draft replies.
 
 Run: python eval/run_eval.py
@@ -15,13 +15,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pydantic import BaseModel, Field
 from langgraph.checkpoint.memory import InMemorySaver
 
-from agents.kb import FAQ_DIR
+from agents.retriever import get_doc_text
 from agents.llm import call_with_retry, make_llm_client
 from agents.runner import Runner
 from config import settings
+from eval.golden_tickets import load_golden_tickets
 from storage import db
 
-LABELED_TICKETS_PATH = Path(__file__).resolve().parent / "labeled_tickets.json"
 FIELDS = ["urgency", "language", "action", "tool_names_requested", "kb_retriever_invoked"]
 
 
@@ -33,8 +33,9 @@ class JudgeVerdict(BaseModel):
 
 def judge_auto_respond(draft_reply: str, cited_kb_doc_ids: list[str]) -> dict:
     docs_text = "\n\n".join(
-        f"=== {doc_id} ===\n{(FAQ_DIR / f'{doc_id}.md').read_text(encoding='utf-8')}"
-        for doc_id in cited_kb_doc_ids if (FAQ_DIR / f"{doc_id}.md").exists()
+        f"=== {doc_id} ===\n{text}"
+        for doc_id in cited_kb_doc_ids
+        for text in [get_doc_text(doc_id)] if text is not None
     ) or "(no docs cited)"
 
     llm = make_llm_client(settings.OPENAI_MODEL).with_structured_output(JudgeVerdict, method="function_calling")
@@ -112,7 +113,7 @@ async def run_one(ticket: dict) -> dict:
 
 
 async def main():
-    tickets = json.loads(LABELED_TICKETS_PATH.read_text(encoding="utf-8"))
+    tickets = load_golden_tickets()
     results = []
     for ticket in tickets:
         outcome = await run_one(ticket)

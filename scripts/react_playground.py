@@ -5,7 +5,7 @@ watch Supervisor/Triage Classifier/KB Retriever/Action Decider/System talk to ea
 other in real time.
 
 Usage:
-  python scripts/react_playground.py --ticket eval/labeled_tickets.json --ticket-id ticket_1_billing
+  python scripts/react_playground.py --ticket tickets.json --ticket-id ticket_1_billing  # a JSON list of tickets
   python scripts/react_playground.py --paste
 """
 import argparse
@@ -165,7 +165,7 @@ def main() -> None:
             pass
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--ticket", help="Path to a ticket JSON file (or a labeled_tickets.json-style list)")
+    parser.add_argument("--ticket", help="Path to a ticket JSON file (or a JSON list of tickets)")
     parser.add_argument("--ticket-id", help="Which entry to use, when --ticket points at a list of tickets")
     parser.add_argument("--paste", action="store_true", help="Start by typing a message instead of loading a ticket file")
     parser.add_argument("--db", default="data/react_playground.db", help="Scratch SQLite file for tool-call bookkeeping")

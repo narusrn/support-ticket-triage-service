@@ -1,4 +1,4 @@
-"""Feeds eval/labeled_tickets.json through the REAL, running HTTP API (not the
+"""Feeds eval/golden_tickets.xlsx through the REAL, running HTTP API (not the
 in-process Runner eval/run_eval.py uses) so the service's SQLite DB ends up with
 real conversations/runs/tool_calls -- i.e. something to actually see in
 GET /api/v1/dashboard and /metrics, not an empty service.
@@ -12,7 +12,6 @@ Usage:
   python scripts/seed_demo_data.py --base-url http://127.0.0.1:8000/api/v1 --api-key ...
 """
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -20,9 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import requests
 
+from eval.golden_tickets import load_golden_tickets
 from scripts.chat import _die_on_error
-
-LABELED_TICKETS = Path(__file__).resolve().parent.parent / "eval" / "labeled_tickets.json"
 
 
 def main() -> None:
@@ -38,7 +36,7 @@ def main() -> None:
     args = parser.parse_args()
     headers = {"X-API-Key": args.api_key} if args.api_key else {}
 
-    tickets = json.loads(LABELED_TICKETS.read_text(encoding="utf-8"))
+    tickets = load_golden_tickets()
     pending: list[tuple[str, str]] = []  # (conversation_id, tool_call_id)
 
     for ticket in tickets:

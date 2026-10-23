@@ -58,7 +58,7 @@ router = APIRouter()
                 "text/plain": {
                     "schema": {"type": "string"},
                     # the spec's own sample Ticket 1 (billing), verbatim -- same thread as
-                    # eval/labeled_tickets.json's ticket_1_billing.
+                    # eval/golden_tickets.xlsx's ticket_1_billing row.
                     "example": (
                         "Customer: Free plan (upgrade attempted), 4 months on free tier, first "
                         "time contacting support.\n"

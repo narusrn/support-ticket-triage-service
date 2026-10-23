@@ -1,26 +1,23 @@
 """Tool implementations and the idempotency-guarded dispatcher.
 
-search_knowledge_base is read-only and executes immediately -- never goes
-through the approval gate. issue_refund and open_incident_or_page_oncall are
-side-effecting: the graph (agents/orchestrator.py, built later) never calls
-them directly -- it only ever reaches them through dispatch_tool_call(), after
-a human has approved via the /approve endpoint. That boundary lives in the
-graph's routing, not here; this module only guarantees that once a tool_call
-row exists, re-dispatching it never re-executes the side effect.
+search_knowledge_base (now agents/retriever.py's agentic RAG retriever,
+called directly from agents/orchestrator.py's call_kb_retriever -- not
+re-exported here anymore) is read-only and executes immediately -- never
+goes through the approval gate. issue_refund and open_incident_or_page_oncall
+ARE side-effecting: the graph never calls them directly -- it only ever
+reaches them through dispatch_tool_call(), after a human has approved via
+the /approve endpoint. That boundary lives in the graph's routing, not here;
+this module only guarantees that once a tool_call row exists, re-dispatching
+it never re-executes the side effect.
 """
 import random
 from typing import Any, Optional
 
-from agents.kb import search_knowledge_base as _search_kb
 from storage import db
 
 
 class ToolExecutionError(Exception):
     """Raised by a mocked tool to simulate a transient failure."""
-
-
-def search_knowledge_base(query: str, top_k: int = 3) -> list[dict]:
-    return _search_kb(query, top_k=top_k)
 
 
 def issue_refund(charge_ids: list[str], amount_usd: float, *, simulate_failure: bool = False) -> dict[str, Any]:

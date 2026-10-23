@@ -7,9 +7,9 @@ needed, for any test in this file.
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
-from agents import tools
 from agents.orchestrator import GraphState, _REACT_LANGUAGE_RULE, _language_rule, build_graph, maybe_trim_messages
 from agents.llm import LLMUnavailableError
+from agents.retriever import build_stub_graph
 from config import settings
 from storage import db
 
@@ -117,12 +117,16 @@ def test_search_knowledge_base_never_suspends_the_graph(tmp_path):
                 "cited_kb_doc_ids": ["faq_dark_mode"], "draft_reply": "Dark mode is on the roadmap...",
                 "pending_tool": None}
 
+    retriever_graph = build_stub_graph(
+        lambda query: [{"doc_id": "faq_dark_mode", "snippet": "Dark mode is on the roadmap..."}])
+
     llm = _ScriptedLLM([
         _FakeResponse([_handoff_call("triage_classifier")]),
         _FakeResponse([_handoff_call("kb_retriever")]),
         _FakeResponse([_handoff_call("action_decider")]),
     ])
-    graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, decide_fn=decide_fn, supervisor_llm=llm)
+    graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, decide_fn=decide_fn,
+                         supervisor_llm=llm, retriever_graph=retriever_graph)
     result = graph.invoke(_initial_state(), {"configurable": {"thread_id": "c_3"}})
 
     assert "__interrupt__" not in result
@@ -131,20 +135,20 @@ def test_search_knowledge_base_never_suspends_the_graph(tmp_path):
     assert any(m["content"].startswith("KB Retriever:") for m in result["messages"])
 
 
-def test_kb_retriever_searches_with_the_customers_own_words_not_a_taxonomy_tag(tmp_path, monkeypatch):
+def test_kb_retriever_searches_with_the_customers_own_words_not_a_taxonomy_tag(tmp_path):
     """Found live (golden-set tickets 6/7 against the real model): issue_type is a
-    short category tag like "feature_question" -- using it as the TF-IDF search query
+    short category tag like "feature_question" -- using it as the search query
     matched nothing in the FAQ corpus (no overlap with any doc's actual vocabulary),
     silently starving action_decider of KB results it should have had. The query must
     be built from what the customer actually said, not the classifier's label for it."""
     conn = _conn(tmp_path)
     seen_queries = []
 
-    def fake_search(query, *args, **kwargs):
+    def _fake_search(query):
         seen_queries.append(query)
         return []
 
-    monkeypatch.setattr(tools, "search_knowledge_base", fake_search)
+    retriever_graph = build_stub_graph(_fake_search)
 
     def classify_fn(state, messages):
         return {**VALID_FAQ_CLASSIFICATION, "issue_type": "feature_question"}
@@ -158,7 +162,8 @@ def test_kb_retriever_searches_with_the_customers_own_words_not_a_taxonomy_tag(t
         _FakeResponse([_handoff_call("kb_retriever")]),
         _FakeResponse([_handoff_call("action_decider")]),
     ])
-    graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, decide_fn=decide_fn, supervisor_llm=llm)
+    graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, decide_fn=decide_fn,
+                         supervisor_llm=llm, retriever_graph=retriever_graph)
     state = _initial_state()
     state["messages"] = [{"role": "customer", "content": "How do I export my data as a CSV?"}]
     graph.invoke(state, {"configurable": {"thread_id": "c_kb_query"}})
@@ -187,7 +192,8 @@ def test_kb_retriever_reports_back_so_supervisor_does_not_loop_on_it(tmp_path):
         _FakeResponse([_handoff_call("kb_retriever")]),
         _FakeResponse([_handoff_call("action_decider")]),
     ])
-    graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, decide_fn=decide_fn, supervisor_llm=llm)
+    graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, decide_fn=decide_fn,
+                         supervisor_llm=llm, retriever_graph=build_stub_graph(lambda query: []))
     result = graph.invoke(_initial_state(), {"configurable": {"thread_id": "c_kb"}})
 
     status_msgs = [m for m in result["messages"] if m["content"].startswith("KB Retriever:")]
@@ -550,7 +556,8 @@ def test_max_steps_halts_an_oscillating_supervisor(tmp_path, monkeypatch):
     # never moves on to action_decider -- always wants kb_retriever, simulating an
     # oscillating supervisor that never converges
     llm = _RepeatingLLM(_FakeResponse([_handoff_call("kb_retriever", reason="stuck on purpose")]))
-    graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, supervisor_llm=llm)
+    graph = build_graph(conn, InMemorySaver(), classify_fn=classify_fn, supervisor_llm=llm,
+                         retriever_graph=build_stub_graph(lambda query: []))
     result = graph.invoke(_initial_state(), {"configurable": {"thread_id": "c_8"}})
 
     assert "__interrupt__" not in result
