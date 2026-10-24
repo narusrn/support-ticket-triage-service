@@ -43,16 +43,29 @@ that nothing gets skipped for time.
    (visible in the diagram itself, not just described) — `WRITEUP.md` §4a has the two
    adaptations (sync not async, per-topic `doc_id` kept through chunking) and why.
 
-6. **Eval harness — numbers, not vibes.** `eval/golden_tickets.xlsx` (12 hand-labeled
-   tickets, flattened columns, easy to re-edit) run against the real model via
-   `eval/run_eval.py`. Report the real last-run numbers from `WRITEUP.md` §4 — pull
-   whatever is currently written there (it documents an averaged, multi-run picture,
-   not a single cherry-picked best run). Language detection and judge-groundedness
-   are consistently the strongest numbers; action/urgency carry real run-to-run
-   variance, documented rather than hidden (several tickets' own `notes` column in the
-   xlsx explain the specific judgment call). The LLM-as-judge pass is the detail worth
-   a sentence: it independently checks every `auto_respond` reply stays grounded in
-   the *cited* KB doc's real text, not just that a doc was cited.
+6. **Eval harness — two layers, not one, because they answer different questions.**
+   `eval/golden_tickets.xlsx` (12 hand-labeled tickets, flattened columns, easy to
+   re-edit) run against the real model via `eval/run_eval.py`. Worth stating plainly,
+   not left implicit:
+   - **Golden-set matching** — did the model extract the right *structured* fields
+     (`urgency`, `language`, `action`, `tool_names`, `kb_retriever_invoked`)? Graded
+     by deterministic exact-match against the xlsx's hand-labeled `expected_*`
+     columns — no LLM involved in the grading itself.
+   - **LLM-as-judge** — is the *free-text* `draft_reply` actually true? Can't
+     exact-match prose, so a second, separate LLM call grades it — and critically,
+     against **no pre-written answer**: it's handed the real text of whichever KB
+     doc the agent cited (`get_doc_text()`, read fresh from `data/knowledge_base.txt`
+     every time) and asked whether the reply stays inside it. One sentence worth
+     saying out loud: there's no `expected_reply` column in the spreadsheet at
+     all, by design — a good reply can be phrased many ways, so the ground truth
+     is the real source material, not a stored answer.
+
+   Report the real last-run numbers from `WRITEUP.md` §4 — pull whatever is
+   currently written there (it documents an averaged, multi-run picture, not a
+   single cherry-picked best run). Language detection and judge-groundedness are
+   consistently the strongest numbers; action/urgency carry real run-to-run
+   variance, documented rather than hidden (several tickets' own `notes` column in
+   the xlsx explain the specific judgment call).
 
 7. **API output, part 1 — a clean auto-respond.** Two things on one slide, not a
    schema dump: the shape of `GET /conversations/{id}`'s `decision` object (just
