@@ -72,7 +72,13 @@ def get_agents(prompts_dir: Path = PROMPTS_DIR) -> dict[str, AgentSpec]:
 
 
 def get_supervisor_prompt(prompts_dir: Path = PROMPTS_DIR) -> str:
-    return (prompts_dir / "_supervisor.md").read_text(encoding="utf-8").strip()
+    # {team_section} is built from each specialist's own frontmatter (name +
+    # description), the same registry get_agents() already parses for .prompt
+    # elsewhere -- so adding a new specialist's .md file is enough for the
+    # supervisor to learn about it, no manual edit to this template needed.
+    template = (prompts_dir / "_supervisor.md").read_text(encoding="utf-8").strip()
+    team_section = "\n".join(f"- {spec.name}: {spec.description}" for spec in get_agents(prompts_dir).values())
+    return template.format(team_section=team_section)
 
 
 def make_llm_client(model: str) -> ChatOpenAI:
