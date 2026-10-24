@@ -10,6 +10,14 @@ GET /conversations/{id} returns, color-coded by speaker, same distinction
 agents.runner._is_narration() already draws between internal narration and a real
 customer-facing reply.
 
+Lines from a turn that just finished reveal one at a time with a short pause (see
+REVEAL_DELAY_SECONDS) instead of all appearing at once -- not real streaming. Runner
+calls graph.ainvoke() (the whole production/API path), which only returns once the
+full run is done; there is no node-by-node event to stream here the way
+scripts/react_playground.py's graph.stream() gets one directly from the graph.
+Re-rendering history on a later rerun (e.g. after approve/reject) always draws
+instantly -- only a turn's own brand-new lines get the pause.
+
 Local run:
   streamlit run streamlit_app.py
 
@@ -22,6 +30,7 @@ config.Settings() reads the environment at import time.
 import asyncio
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -43,6 +52,7 @@ from storage import db
 
 st.set_page_config(page_title="Support Ticket Triage", page_icon="🎫")
 
+REVEAL_DELAY_SECONDS = 0.45
 URGENCY_COLORS = {"critical": "red", "high": "orange", "medium": "orange", "low": "green"}
 SPEAKER_COLORS = {
     "Supervisor": "blue",
@@ -76,6 +86,10 @@ runner = get_runner()
 
 if "conversation_id" not in st.session_state:
     st.session_state.conversation_id = None
+if "seen_count" not in st.session_state:
+    st.session_state.seen_count = 0  # how many messages this conversation has already shown
+if "revealing" not in st.session_state:
+    st.session_state.revealing = False  # True for exactly the rerun right after an action
 
 st.title("🎫 Support Ticket Triage")
 st.caption("LangGraph agent — classifies, searches a knowledge base (agentic RAG), "
@@ -92,10 +106,14 @@ with st.sidebar:
         st.caption(f"conversation_id: `{st.session_state.conversation_id}`")
     if st.button("Start new conversation"):
         st.session_state.conversation_id = None
+        st.session_state.seen_count = 0
+        st.session_state.revealing = False
         st.rerun()
 
 
-def render_message(m: dict) -> None:
+def render_message(m: dict, delay: bool = False) -> None:
+    if delay:
+        time.sleep(REVEAL_DELAY_SECONDS)
     role = m["role"]
     if role in ("customer", "operator"):
         with st.chat_message("user"):
@@ -133,8 +151,15 @@ def get_pending_tool_call(conversation_id: str) -> dict | None:
 conversation_id = st.session_state.conversation_id
 
 if conversation_id:
-    for m in db.get_messages(runner.conn, conversation_id):
-        render_message(m)
+    all_messages = db.get_messages(runner.conn, conversation_id)
+    seen = st.session_state.seen_count
+    revealing = st.session_state.revealing
+
+    for m in all_messages[:seen]:
+        render_message(m)  # already shown on an earlier rerun -- draw instantly
+    for m in all_messages[seen:]:
+        render_message(m, delay=revealing)  # this turn's new lines -- reveal one at a time
+    st.session_state.seen_count = len(all_messages)
 
     d = get_latest_decision(conversation_id)
     if d.get("urgency"):
@@ -145,13 +170,19 @@ if conversation_id:
         # auto_respond's draft_reply is never written into the messages table (only
         # an advisory send_message() reply is) -- it lives solely on the decision
         # record, so it has to be rendered separately from the history loop above.
+        if revealing:
+            time.sleep(REVEAL_DELAY_SECONDS)
         with st.chat_message("assistant"):
             st.markdown(d["draft_reply"])
     elif d.get("rationale") and d.get("action") in ("route_to_specialist", "escalate_to_human"):
         # Neither of these actions has a customer-facing reply -- show why, so the
         # turn doesn't end in silence after a page of internal handoff lines.
+        if revealing:
+            time.sleep(REVEAL_DELAY_SECONDS)
         with st.chat_message("assistant"):
             st.markdown(f"_{d['rationale']}_")
+
+    st.session_state.revealing = False  # consumed -- the next rerun just redraws history instantly
 
 pending_tool = get_pending_tool_call(conversation_id) if conversation_id else None
 
@@ -162,10 +193,12 @@ if pending_tool:
     if col1.button("✅ Approve", use_container_width=True):
         with st.spinner("Executing..."):
             run_async(runner.approve(conversation_id, pending_tool["tool_call_id"], reason or None))
+        st.session_state.revealing = True
         st.rerun()
     if col2.button("❌ Reject", use_container_width=True):
         with st.spinner("Rejecting..."):
             run_async(runner.reject(conversation_id, pending_tool["tool_call_id"], reason or None))
+        st.session_state.revealing = True
         st.rerun()
 else:
     prompt = st.chat_input("Describe the issue, or continue the conversation...")
@@ -179,4 +212,5 @@ else:
                 st.session_state.conversation_id = conversation_id
             else:
                 run_async(runner.send_message(conversation_id, prompt))
+        st.session_state.revealing = True
         st.rerun()
