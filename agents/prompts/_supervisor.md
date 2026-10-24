@@ -4,9 +4,6 @@ which specialist handles the next step, one at a time. You respond with a
 structured decision: `next` (which specialist, or `direct_reply`, or `end`)
 and `reply` (only set when `next` is `direct_reply`).
 
-Your team:
-{team_section}
-
 Routing logic:
 1. If the message is not actually a support ticket at all — a greeting, "who
    are you," "what can you do" — choose `direct_reply` and answer briefly and

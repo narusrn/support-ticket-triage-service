@@ -72,13 +72,15 @@ def get_agents(prompts_dir: Path = PROMPTS_DIR) -> dict[str, AgentSpec]:
 
 
 def get_supervisor_prompt(prompts_dir: Path = PROMPTS_DIR) -> str:
-    # {team_section} is built from each specialist's own frontmatter (name +
-    # description), the same registry get_agents() already parses for .prompt
-    # elsewhere -- so adding a new specialist's .md file is enough for the
-    # supervisor to learn about it, no manual edit to this template needed.
-    template = (prompts_dir / "_supervisor.md").read_text(encoding="utf-8").strip()
-    team_section = "\n".join(f"- {spec.name}: {spec.description}" for spec in get_agents(prompts_dir).values())
-    return template.format(team_section=team_section)
+    # Tried injecting a dynamic {team_section} (each specialist's frontmatter
+    # name + description) here once -- reverted. Measured against the real
+    # model over 3 full eval/run_eval.py runs: 3 tickets that previously hit
+    # kb_retriever reliably (>80%) dropped to 0/9 with the team listing added,
+    # while other tickets were unaffected. Extra prompt content that LOOKS
+    # harmless can still shift routing behavior measurably -- back to the
+    # static file, trust the explicit routing-logic steps over a generated
+    # summary of "who's on the team."
+    return (prompts_dir / "_supervisor.md").read_text(encoding="utf-8").strip()
 
 
 def make_llm_client(model: str) -> ChatOpenAI:
