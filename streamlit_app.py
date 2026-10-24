@@ -4,6 +4,12 @@ same way scripts/react_playground.py talks to the graph directly instead of over
 HTTP -- Streamlit Cloud only runs this one process, so there's nothing to call out
 to even if we wanted an HTTP hop.
 
+Shows the internal handoff trail (Supervisor -> Triage Classifier -> KB Retriever ->
+Action Decider), not just the final reply -- the same "Speaker: sentence" lines
+GET /conversations/{id} returns, color-coded by speaker, same distinction
+agents.runner._is_narration() already draws between internal narration and a real
+customer-facing reply.
+
 Local run:
   streamlit run streamlit_app.py
 
@@ -32,12 +38,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from langgraph.checkpoint.memory import InMemorySaver
 
-from agents.runner import Runner
+from agents.runner import Runner, _is_narration
 from storage import db
 
 st.set_page_config(page_title="Support Ticket Triage", page_icon="🎫")
 
 URGENCY_COLORS = {"critical": "red", "high": "orange", "medium": "orange", "low": "green"}
+SPEAKER_COLORS = {
+    "Supervisor": "blue",
+    "Triage Classifier": "orange",
+    "KB Retriever": "violet",
+    "Action Decider": "green",
+    "System": "gray",
+}
 
 
 @st.cache_resource
@@ -63,14 +76,11 @@ runner = get_runner()
 
 if "conversation_id" not in st.session_state:
     st.session_state.conversation_id = None
-if "messages" not in st.session_state:
-    st.session_state.messages = []  # [{"role": "customer"|"agent", "content": str}]
-if "pending_tool" not in st.session_state:
-    st.session_state.pending_tool = None
 
 st.title("🎫 Support Ticket Triage")
 st.caption("LangGraph agent — classifies, searches a knowledge base (agentic RAG), "
-           "and decides the next action. Side-effecting actions need your approval below.")
+           "and decides the next action. Internal handoffs are shown as they happen; "
+           "side-effecting actions need your approval below.")
 
 with st.sidebar:
     st.subheader("New ticket")
@@ -82,69 +92,91 @@ with st.sidebar:
         st.caption(f"conversation_id: `{st.session_state.conversation_id}`")
     if st.button("Start new conversation"):
         st.session_state.conversation_id = None
-        st.session_state.messages = []
-        st.session_state.pending_tool = None
         st.rerun()
 
-for m in st.session_state.messages:
-    with st.chat_message("user" if m["role"] == "customer" else "assistant"):
-        st.markdown(m["content"])
+
+def render_message(m: dict) -> None:
+    role = m["role"]
+    if role in ("customer", "operator"):
+        with st.chat_message("user"):
+            if role == "operator":
+                st.caption("you, as operator")
+            st.markdown(m["content"])
+    elif _is_narration(m):
+        # An internal handoff line ("Supervisor: ...", "KB Retriever: ...") -- the
+        # supervisor/specialists talking to each other, not a customer-facing reply.
+        # Kept out of a chat bubble and color-coded by speaker so the handoff trail
+        # reads as a trace, not as more things the agent "said" to the customer.
+        speaker, _, text = m["content"].partition(": ")
+        color = SPEAKER_COLORS.get(speaker, "gray")
+        st.markdown(f":{color}[**{speaker}**] {text}")
+    else:
+        # A real reply: a direct_reply to a non-ticket message, an auto_respond
+        # draft_reply, or an advisory follow-up answer -- none of these carry a
+        # "Speaker: " prefix, which is exactly how _is_narration() tells them apart.
+        with st.chat_message("assistant"):
+            st.markdown(m["content"])
 
 
-def render_decision(data: dict) -> None:
-    d = data["decision"]
-    urgency = d.get("urgency", "?")
-    color = URGENCY_COLORS.get(urgency, "gray")
-    st.markdown(f":{color}[**{urgency.upper()}**]  ·  action: **{d.get('action')}**  "
-                f"·  confidence {d.get('confidence', 0):.2f}")
+def get_latest_decision(conversation_id: str) -> dict:
+    decisions = db.get_decisions(runner.conn, conversation_id)
+    return decisions[-1] if decisions else {}
 
-    reply_text = data.get("reply") or d.get("draft_reply")
-    if reply_text:
-        st.markdown(reply_text)
-        st.session_state.messages.append({"role": "agent", "content": reply_text})
-    elif d.get("rationale"):
-        # route_to_specialist / escalate_to_human usually has no customer-facing reply --
-        # show the rationale instead of leaving the chat turn silent.
-        note = f"_{d['rationale']}_"
-        st.markdown(note)
-        st.session_state.messages.append({"role": "agent", "content": note})
 
-    for tc in d.get("tool_calls", []):
+def get_pending_tool_call(conversation_id: str) -> dict | None:
+    for tc in db.get_tool_calls(runner.conn, conversation_id):
         if tc["status"] == "pending_approval":
-            st.session_state.pending_tool = tc
+            return tc
+    return None
 
 
-if st.session_state.pending_tool:
-    tc = st.session_state.pending_tool
-    st.warning(f"Approval needed: **{tc['tool_name']}**({tc['args']})")
+conversation_id = st.session_state.conversation_id
+
+if conversation_id:
+    for m in db.get_messages(runner.conn, conversation_id):
+        render_message(m)
+
+    d = get_latest_decision(conversation_id)
+    if d.get("urgency"):
+        color = URGENCY_COLORS.get(d["urgency"], "gray")
+        st.caption(f":{color}[{d['urgency'].upper()}]  ·  action: **{d.get('action')}**  "
+                   f"·  confidence {d.get('confidence', 0):.2f}")
+    if d.get("draft_reply"):
+        # auto_respond's draft_reply is never written into the messages table (only
+        # an advisory send_message() reply is) -- it lives solely on the decision
+        # record, so it has to be rendered separately from the history loop above.
+        with st.chat_message("assistant"):
+            st.markdown(d["draft_reply"])
+    elif d.get("rationale") and d.get("action") in ("route_to_specialist", "escalate_to_human"):
+        # Neither of these actions has a customer-facing reply -- show why, so the
+        # turn doesn't end in silence after a page of internal handoff lines.
+        with st.chat_message("assistant"):
+            st.markdown(f"_{d['rationale']}_")
+
+pending_tool = get_pending_tool_call(conversation_id) if conversation_id else None
+
+if pending_tool:
+    st.warning(f"Approval needed: **{pending_tool['tool_name']}**({pending_tool['args']})")
     reason = st.text_input("Reason (optional)", key="approval_reason")
     col1, col2 = st.columns(2)
     if col1.button("✅ Approve", use_container_width=True):
-        data = run_async(runner.approve(st.session_state.conversation_id, tc["tool_call_id"], reason or None))
-        st.session_state.pending_tool = None
-        with st.chat_message("assistant"):
-            render_decision(data)
+        with st.spinner("Executing..."):
+            run_async(runner.approve(conversation_id, pending_tool["tool_call_id"], reason or None))
         st.rerun()
     if col2.button("❌ Reject", use_container_width=True):
-        data = run_async(runner.reject(st.session_state.conversation_id, tc["tool_call_id"], reason or None))
-        st.session_state.pending_tool = None
-        with st.chat_message("assistant"):
-            render_decision(data)
+        with st.spinner("Rejecting..."):
+            run_async(runner.reject(conversation_id, pending_tool["tool_call_id"], reason or None))
         st.rerun()
 else:
     prompt = st.chat_input("Describe the issue, or continue the conversation...")
     if prompt:
-        st.session_state.messages.append({"role": "customer", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
         with st.spinner("Thinking..."):
-            if st.session_state.conversation_id is None:
+            if conversation_id is None:
                 conversation_id = f"c_{uuid.uuid4().hex[:8]}"
                 metadata = {"plan": plan, "tenure_months": int(tenure_months), "prior_tickets": int(prior_tickets)}
-                data = run_async(runner.ingest_ticket(
+                run_async(runner.ingest_ticket(
                     conversation_id, [{"role": "customer", "content": prompt}], metadata))
                 st.session_state.conversation_id = conversation_id
             else:
-                data = run_async(runner.send_message(st.session_state.conversation_id, prompt))
-        with st.chat_message("assistant"):
-            render_decision(data)
+                run_async(runner.send_message(conversation_id, prompt))
+        st.rerun()
