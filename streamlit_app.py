@@ -162,14 +162,25 @@ if conversation_id:
     st.session_state.seen_count = len(all_messages)
 
     d = get_latest_decision(conversation_id)
-    if d.get("urgency"):
+    # A greeting/non-ticket message gets a synthetic auto_respond decision purely so
+    # every response has the same API shape (see agents/orchestrator.py's supervisor)
+    # -- its reply is already one of all_messages (unprefixed, not narration) and its
+    # urgency/action/confidence aren't a real triage outcome, so neither belongs here.
+    is_direct_reply = d.get("rationale") == "direct conversational reply -- not a ticket requiring triage"
+
+    if d.get("urgency") and not is_direct_reply:
         color = URGENCY_COLORS.get(d["urgency"], "gray")
         st.caption(f":{color}[{d['urgency'].upper()}]  ·  action: **{d.get('action')}**  "
                    f"·  confidence {d.get('confidence', 0):.2f}")
-    if d.get("draft_reply"):
+
+    already_shown = {m["content"] for m in all_messages}
+    if d.get("draft_reply") and d["draft_reply"] not in already_shown:
         # auto_respond's draft_reply is never written into the messages table (only
-        # an advisory send_message() reply is) -- it lives solely on the decision
-        # record, so it has to be rendered separately from the history loop above.
+        # an advisory send_message() reply, or a direct_reply's own answer, is) -- it
+        # lives solely on the decision record, so it has to be rendered separately
+        # from the history loop above. The already_shown check is what keeps a
+        # direct_reply from appearing twice -- its answer IS in all_messages, so this
+        # skips it instead of rendering the same text as a second bubble.
         if revealing:
             time.sleep(REVEAL_DELAY_SECONDS)
         with st.chat_message("assistant"):
