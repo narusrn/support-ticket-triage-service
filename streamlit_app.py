@@ -124,8 +124,8 @@ if "seen_count" not in st.session_state:
     st.session_state.seen_count = 0  # how many messages this conversation has already shown
 if "revealing" not in st.session_state:
     st.session_state.revealing = False  # True for exactly the rerun right after an action
-if "pending_example" not in st.session_state:
-    st.session_state.pending_example = None  # set by an example button, consumed like a chat_input submission
+if "draft_text" not in st.session_state:
+    st.session_state.draft_text = None  # set by an example button; shown in an editable box, not auto-sent
 
 st.title("🎫 Support Ticket Triage")
 st.caption("LangGraph agent — classifies, searches a knowledge base (agentic RAG), "
@@ -144,7 +144,7 @@ with st.sidebar:
         st.session_state.conversation_id = None
         st.session_state.seen_count = 0
         st.session_state.revealing = False
-        st.session_state.pending_example = None
+        st.session_state.draft_text = None
         st.rerun()
 
 
@@ -249,22 +249,35 @@ if pending_tool:
         st.session_state.revealing = True
         st.rerun()
 else:
-    if conversation_id is None:
-        # Examples only make sense for starting a new conversation -- st.chat_input
-        # can't be pre-filled programmatically (no `value=` the way st.text_input
-        # has), so a click sends the example immediately via pending_example instead
-        # of just dropping the text into the box for the user to review first.
+    if conversation_id is None and not st.session_state.draft_text:
+        # Examples only make sense for starting a new conversation. A click fills
+        # draft_text instead of sending anything -- st.chat_input can't be
+        # pre-filled programmatically (no `value=` the way st.text_input has), so
+        # showing an editable st.text_area below is what lets the user review or
+        # tweak the example before they, themselves, press Send.
         st.caption("Try an example:")
         cols = st.columns(len(EXAMPLE_TICKETS))
         for col, example in zip(cols, EXAMPLE_TICKETS):
             if col.button(example["label"], use_container_width=True):
-                st.session_state.pending_example = example["text"]
+                st.session_state.draft_text = example["text"]
                 st.rerun()
 
-    prompt = st.chat_input("Describe the issue, or continue the conversation...")
-    if not prompt and st.session_state.pending_example:
-        prompt = st.session_state.pending_example
-        st.session_state.pending_example = None
+    prompt = None
+    if st.session_state.draft_text:
+        # Swapped in for st.chat_input while a draft is active -- having both
+        # visible at once would be confusing about which one actually sends.
+        edited = st.text_area("Edit if you'd like, then send:", value=st.session_state.draft_text,
+                               height=120, key="draft_editor")
+        col_send, col_cancel = st.columns([1, 5])
+        if col_send.button("Send ➤", type="primary", use_container_width=True):
+            prompt = edited
+            st.session_state.draft_text = None
+        if col_cancel.button("Cancel"):
+            st.session_state.draft_text = None
+            st.rerun()
+    else:
+        prompt = st.chat_input("Describe the issue, or continue the conversation...")
+
     if prompt:
         with st.spinner("Thinking..."):
             if conversation_id is None:
