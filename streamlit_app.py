@@ -54,6 +54,40 @@ st.set_page_config(page_title="Support Ticket Triage", page_icon="🎫")
 
 REVEAL_DELAY_SECONDS = 0.45
 URGENCY_COLORS = {"critical": "red", "high": "orange", "medium": "orange", "low": "green"}
+
+# Real golden-set tickets (eval/golden_tickets.xlsx), not invented text -- picked to
+# each demo a different path: direct_reply, auto_respond+RAG, escalate+approval gate,
+# Thai language detection. Multi-message threads are newline-joined into one block,
+# same convention scripts/chat.py --paste and the raw text/plain ingest endpoint use,
+# since a new conversation's first message here is a single chat_input submission.
+EXAMPLE_TICKETS = [
+    {
+        "label": "👋 Just a greeting",
+        "text": "Hi, who are you? What can you help with?",
+    },
+    {
+        "label": "📄 FAQ-answerable (data export)",
+        "text": "Hi, how do I export my data as a CSV? I need it for an audit next week, no rush.",
+    },
+    {
+        "label": "💸 Billing dispute (needs approval)",
+        "text": "\n".join([
+            "My payment failed when I tried to upgrade to Pro. Can you check what's wrong?",
+            "I tried again with a different card. Now I see TWO pending charges but my account still shows Free plan??",
+            "Okay this is getting ridiculous. Just checked my bank app — I have THREE charges of $29.99 now. None refunded. And I STILL don't have Pro access.",
+            "HELLO?? Is anyone there??? I need this fixed NOW. I have a presentation in 2 hours and need the Pro export features. If these charges aren't reversed by end of day I'm disputing all of them with my bank.",
+        ]),
+    },
+    {
+        "label": "🔥 Critical outage (Thai)",
+        "text": "\n".join([
+            "ระบบเข้าไม่ได้ครับ ขึ้น error 500",
+            "ลองหลายเครื่องแล้ว ทั้ง Chrome, Safari, Firefox ผลเหมือนกันหมด เพื่อนร่วมงานก็เข้าไม่ได้เหมือนกัน",
+            "ตอนนี้ลูกค้าโวยเข้ามาเยอะมาก เรามี demo กับลูกค้ารายใหญ่บ่ายนี้ ถ้าระบบไม่กลับมา deal นี้อาจจะหลุด",
+            "เช็ค status.company.com แล้ว บอกว่า all systems operational แต่เราใช้งานไม่ได้จริงๆ region Asia มีปัญหาหรือเปล่า?",
+        ]),
+    },
+]
 SPEAKER_COLORS = {
     "Supervisor": "blue",
     "Triage Classifier": "orange",
@@ -90,6 +124,8 @@ if "seen_count" not in st.session_state:
     st.session_state.seen_count = 0  # how many messages this conversation has already shown
 if "revealing" not in st.session_state:
     st.session_state.revealing = False  # True for exactly the rerun right after an action
+if "pending_example" not in st.session_state:
+    st.session_state.pending_example = None  # set by an example button, consumed like a chat_input submission
 
 st.title("🎫 Support Ticket Triage")
 st.caption("LangGraph agent — classifies, searches a knowledge base (agentic RAG), "
@@ -108,6 +144,7 @@ with st.sidebar:
         st.session_state.conversation_id = None
         st.session_state.seen_count = 0
         st.session_state.revealing = False
+        st.session_state.pending_example = None
         st.rerun()
 
 
@@ -212,7 +249,22 @@ if pending_tool:
         st.session_state.revealing = True
         st.rerun()
 else:
+    if conversation_id is None:
+        # Examples only make sense for starting a new conversation -- st.chat_input
+        # can't be pre-filled programmatically (no `value=` the way st.text_input
+        # has), so a click sends the example immediately via pending_example instead
+        # of just dropping the text into the box for the user to review first.
+        st.caption("Try an example:")
+        cols = st.columns(len(EXAMPLE_TICKETS))
+        for col, example in zip(cols, EXAMPLE_TICKETS):
+            if col.button(example["label"], use_container_width=True):
+                st.session_state.pending_example = example["text"]
+                st.rerun()
+
     prompt = st.chat_input("Describe the issue, or continue the conversation...")
+    if not prompt and st.session_state.pending_example:
+        prompt = st.session_state.pending_example
+        st.session_state.pending_example = None
     if prompt:
         with st.spinner("Thinking..."):
             if conversation_id is None:
