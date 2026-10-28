@@ -59,19 +59,26 @@ URGENCY_COLORS = {"critical": "red", "high": "orange", "medium": "orange", "low"
 # each demo a different path: direct_reply, auto_respond+RAG, escalate+approval gate,
 # Thai language detection. Multi-message threads are newline-joined into one block,
 # same convention scripts/chat.py --paste and the raw text/plain ingest endpoint use,
-# since a new conversation's first message here is a single chat_input submission.
+# since a new conversation's first message here is a single submission either way.
+# Each (except the greeting) is framed with a short "help me analyze/respond to this
+# ticket" instruction -- verified against the real model that this doesn't change the
+# triage outcome (same action/urgency/tool_calls/language as the bare thread text).
 EXAMPLE_TICKETS = [
     {
         "label": "👋 Just a greeting",
+        # No "help me analyze" framing here on purpose -- the whole point of this
+        # example is that it ISN'T a ticket, and should get a direct_reply instead
+        # of being forced through triage.
         "text": "Hi, who are you? What can you help with?",
     },
     {
         "label": "📄 FAQ-answerable (data export)",
-        "text": "Hi, how do I export my data as a CSV? I need it for an audit next week, no rush.",
+        "text": "Help me respond to this ticket:\n\n"
+                "Hi, how do I export my data as a CSV? I need it for an audit next week, no rush.",
     },
     {
         "label": "💸 Billing dispute (needs approval)",
-        "text": "\n".join([
+        "text": "Help me analyze this ticket and figure out the next action:\n\n" + "\n".join([
             "My payment failed when I tried to upgrade to Pro. Can you check what's wrong?",
             "I tried again with a different card. Now I see TWO pending charges but my account still shows Free plan??",
             "Okay this is getting ridiculous. Just checked my bank app — I have THREE charges of $29.99 now. None refunded. And I STILL don't have Pro access.",
@@ -80,7 +87,10 @@ EXAMPLE_TICKETS = [
     },
     {
         "label": "🔥 Critical outage (Thai)",
-        "text": "\n".join([
+        # Instruction written in Thai too, matching the thread's own language --
+        # verified against the real model that this doesn't throw off language
+        # detection or the escalate_to_human/page-oncall outcome.
+        "text": "ช่วยวิเคราะห์ ticket นี้หน่อยครับ ว่าควรทำยังไงต่อ:\n\n" + "\n".join([
             "ระบบเข้าไม่ได้ครับ ขึ้น error 500",
             "ลองหลายเครื่องแล้ว ทั้ง Chrome, Safari, Firefox ผลเหมือนกันหมด เพื่อนร่วมงานก็เข้าไม่ได้เหมือนกัน",
             "ตอนนี้ลูกค้าโวยเข้ามาเยอะมาก เรามี demo กับลูกค้ารายใหญ่บ่ายนี้ ถ้าระบบไม่กลับมา deal นี้อาจจะหลุด",
