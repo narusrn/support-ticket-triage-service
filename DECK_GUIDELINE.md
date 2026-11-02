@@ -43,39 +43,49 @@ that nothing gets skipped for time.
    (visible in the diagram itself, not just described) — `WRITEUP.md` §4a has the two
    adaptations (sync not async, per-topic `doc_id` kept through chunking) and why.
 
-6. **Eval harness — two layers, not one, because they answer different questions.**
-   `eval/golden_tickets.xlsx` (12 hand-labeled tickets, flattened columns, easy to
-   re-edit) run against the real model via `eval/run_eval.py`. Worth stating plainly,
-   not left implicit:
-   - **Golden-set matching** — did the model extract the right *structured* fields
-     (`urgency`, `language`, `action`, `tool_names`, `kb_retriever_invoked`)? Graded
-     by deterministic exact-match against the xlsx's hand-labeled `expected_*`
-     columns — no LLM involved in the grading itself.
-   - **LLM-as-judge** — is the *free-text* `draft_reply` actually true? Can't
-     exact-match prose, so a second, separate LLM call grades it — and critically,
-     against **no pre-written answer**: it's handed the real text of whichever KB
-     doc the agent cited (`get_doc_text()`, read fresh from `data/knowledge_base.txt`
-     every time) and asked whether the reply stays inside it. One sentence worth
-     saying out loud: there's no `expected_reply` column in the spreadsheet at
-     all, by design — a good reply can be phrased many ways, so the ground truth
-     is the real source material, not a stored answer.
+6. **Eval harness — three separate layers, because they answer different
+   questions, not one blended score.** `eval/golden_tickets.xlsx` (12 hand-labeled
+   tickets, flattened columns, easy to re-edit) run against the real model via
+   `eval/run_eval.py`, plus a dedicated retrieval benchmark via
+   `eval/retrieval_eval.py`. Use this exact slide text — it's a format the user
+   liked from a reference deck, adapted to this repo's real numbers (no
+   placeholder values):
 
-   Report the real last-run numbers from `WRITEUP.md` §4 — pull whatever is
-   currently written there (it documents an averaged, multi-run picture, not a
-   single cherry-picked best run). Language detection and judge-groundedness are
-   consistently the strongest numbers; action/urgency carry real run-to-run
-   variance, documented rather than hidden (several tickets' own `notes` column in
-   the xlsx explain the specific judgment call).
+   > **Eval Harness: Three Separate Layers**
+   > 12 golden tickets · `python eval/run_eval.py` · each layer answers a
+   > different question, not one blended score.
+   >
+   > **01 — Pass / fail.** Did each case extract the right structured fields?
+   > **100%** language · tool-selection (`eval/run_eval.py`)
+   > **83%** action · urgency
+   > **75%** kb_retriever_invoked
+   > Known misses are documented per-ticket in `eval/golden_tickets.xlsx`'s
+   > `notes` column — borderline judgment calls (e.g. a login-trouble phrasing
+   > serious enough the supervisor skips straight to `route_to_specialist`),
+   > not code bugs.
+   >
+   > **02 — Retrieval accuracy.** Did it find the right document?
+   > **1.00** Hit Rate@2 (`eval/retrieval_eval.py` · new)
+   > **1.00** MRR
+   > 7 labeled queries with a known `expected_doc_id`. Bypasses the agent's
+   > grade/rewrite loop — isolates retrieval from generation.
+   >
+   > **03 — LLM-as-judge.** Is the reply faithful to what was actually
+   > retrieved that run?
+   > **100%** groundedness (`judge_auto_respond()` in `eval/run_eval.py`)
+   > Judged only genuine KB-grounded `auto_respond` replies — a greeting's
+   > `direct_reply` cites no docs, so it's excluded (nothing to check
+   > groundedness against).
 
-   A third, separate layer worth naming: neither of the two above actually checks
-   whether the *right* KB doc got retrieved — judge-groundedness only checks the
-   reply is faithful to whatever WAS cited, even if it's the wrong doc.
-   `eval/retrieval_eval.py` closes that gap by testing the raw vector search
-   directly (bypassing the agent's grade/rewrite loop) against 7 labeled
-   `(query, expected_doc_id)` pairs: **Hit Rate@k** (does the right doc land in
-   the top k) and **MRR** (how high it ranks when it's not #1). Last real run:
-   Hit Rate@2 = 1.00, MRR = 1.00 on all 7 — worth saying honestly that this is a
-   small labeled set, not a claim the retriever is flawless at scale.
+   Why three, not two, worth saying out loud on the slide or in notes: layer 01
+   never checks free-text truthfulness (can't exact-match prose), layer 03
+   never checks whether the *right* doc was cited in the first place (only that
+   the reply is faithful to whatever WAS cited), and neither used to measure
+   retrieval in isolation — layer 02 closes exactly that gap. Also worth
+   flagging honestly: layer 02's labeled set is only 7 queries, so it confirms
+   the retriever is sound on what's labeled, not a claim it's flawless at scale.
+   `WRITEUP.md` §4/§4a has the full narrative versions of all three if more
+   detail is needed than fits on the slide.
 
 7. **API output, part 1 — a clean auto-respond.** Two things on one slide, not a
    schema dump: the shape of `GET /conversations/{id}`'s `decision` object (just
