@@ -67,6 +67,16 @@ that nothing gets skipped for time.
    variance, documented rather than hidden (several tickets' own `notes` column in
    the xlsx explain the specific judgment call).
 
+   A third, separate layer worth naming: neither of the two above actually checks
+   whether the *right* KB doc got retrieved — judge-groundedness only checks the
+   reply is faithful to whatever WAS cited, even if it's the wrong doc.
+   `eval/retrieval_eval.py` closes that gap by testing the raw vector search
+   directly (bypassing the agent's grade/rewrite loop) against 7 labeled
+   `(query, expected_doc_id)` pairs: **Hit Rate@k** (does the right doc land in
+   the top k) and **MRR** (how high it ranks when it's not #1). Last real run:
+   Hit Rate@2 = 1.00, MRR = 1.00 on all 7 — worth saying honestly that this is a
+   small labeled set, not a claim the retriever is flawless at scale.
+
 7. **API output, part 1 — a clean auto-respond.** Two things on one slide, not a
    schema dump: the shape of `GET /conversations/{id}`'s `decision` object (just
    `urgency`, `action`, `draft_reply`, `cited_kb_doc_ids`, `tool_calls` — full
