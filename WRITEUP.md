@@ -203,6 +203,17 @@ with an honest `rationale`, not a crash:
   runs, not reproducible as a code bug), not a regression from the retriever swap
   below — the retrieval mechanism itself was grounded and correct on every run where
   it was reached.
+- Neither of the two layers above actually verifies the *right* doc was retrieved —
+  judge-groundedness only checks the reply is faithful to whatever doc WAS cited,
+  even if it's the wrong one. `eval/retrieval_eval.py` is a third, separate
+  benchmark that closes this: it bypasses the agent's grade/rewrite loop entirely
+  and tests the raw vector search directly against 7 labeled `(query,
+  expected_doc_id)` pairs, reporting standard IR metrics — **Hit Rate@k** (is the
+  right doc in the top k) and **MRR** (how high it ranks when not #1). Last real
+  run: **Hit Rate@2 = 1.00, MRR = 1.00** across all 7 (k=2 matches production's
+  `RETRIEVER_TOP_K`). Worth stating honestly: 7 labeled queries is a small set, so
+  this confirms the retriever is sound on what's labeled, not a claim it's flawless
+  at scale.
 
 ## 4a. Agentic RAG retriever (vector DB), on request
 

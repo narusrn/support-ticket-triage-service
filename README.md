@@ -290,3 +290,12 @@ Prints per-ticket pass/fail on urgency, language, action, tool selection, and
 KB-routing against hand-labeled expectations, plus an LLM-as-judge pass on any
 reply that's actually grounded in cited KB docs. Costs a handful of real API calls
 (gpt-4o-mini) — needs `OPENAI_API_KEY` set.
+
+```bash
+python eval/retrieval_eval.py    # Hit Rate@k / MRR for the vector search itself, bypassing the agent loop
+```
+
+A separate retrieval-accuracy benchmark — the checks above never confirm the
+*right* KB doc was retrieved, only that the reply stays faithful to whatever
+WAS cited. This tests the raw vector search against 7 labeled `(query,
+expected_doc_id)` pairs. Last real run: Hit Rate@2 = 1.00, MRR = 1.00.
