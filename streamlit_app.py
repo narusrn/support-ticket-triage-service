@@ -211,20 +211,29 @@ conversation_id = st.session_state.conversation_id
 tab_chat, tab_trace = st.tabs(["💬 Chat", "🔍 Trace"])
 
 with tab_trace:
-    st.caption("Raw step-by-step execution trace (agents/orchestrator.py's trace entries) "
-               "for any conversation_id -- paste one from the sidebar, or from GET /conversations/{id}.")
+    st.caption("Raw GET /api/v1/conversations/{conversation_id} response for any "
+               "conversation_id -- paste one from the sidebar. Built from the same DB "
+               "queries that endpoint uses (this app calls agents.runner.Runner in-process, "
+               "no separate server to hit), shown unformatted.")
     trace_conversation_id = st.text_input(
         "conversation_id", value=conversation_id or "", key="trace_conversation_id")
     if trace_conversation_id:
-        events = db.get_trace_events(runner.conn, trace_conversation_id)
-        if not events:
-            st.info("No trace events found for this conversation_id.")
-        for e in events:
-            label = f"step {e['step_index']} · {e['node']} · {e['event_type']}"
-            if e.get("latency_ms") is not None:
-                label += f" · {e['latency_ms']} ms"
-            with st.expander(label):
-                st.json({k: v for k, v in e.items() if k != "conversation_id"})
+        conv = db.get_conversation(runner.conn, trace_conversation_id)
+        if conv is None:
+            st.info("No conversation with this conversation_id.")
+        else:
+            decisions = db.get_decisions(runner.conn, trace_conversation_id)
+            tool_calls = db.get_tool_calls(runner.conn, trace_conversation_id)
+            if decisions:
+                decisions[-1]["tool_calls"] = tool_calls
+            st.json({
+                "conversation_id": trace_conversation_id,
+                "status": conv["status"],
+                "messages": db.get_messages(runner.conn, trace_conversation_id),
+                "decisions": decisions,
+                "tool_calls": tool_calls,
+                "usage": db.get_usage_summary(runner.conn, trace_conversation_id),
+            })
 
 with tab_chat:
     if conversation_id:
