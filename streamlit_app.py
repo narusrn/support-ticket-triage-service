@@ -136,6 +136,16 @@ if "revealing" not in st.session_state:
     st.session_state.revealing = False  # True for exactly the rerun right after an action
 if "draft_text" not in st.session_state:
     st.session_state.draft_text = None  # set by an example button; shown in an editable box, not auto-sent
+if "decision_shown_for" not in st.session_state:
+    st.session_state.decision_shown_for = None  # conversation_id whose decision summary has
+                                                   # already been rendered once -- without this,
+                                                   # get_latest_decision() keeps returning the SAME
+                                                   # (stale) decision on every rerun triggered by a
+                                                   # later advisory send_message() or approve/reject
+                                                   # (neither creates a new decision), so the original
+                                                   # rationale/draft_reply would re-appear below newer
+                                                   # operator follow-ups, looking like the agent
+                                                   # randomly repeating itself out of nowhere.
 
 st.title("🎫 Support Ticket Triage")
 st.caption("LangGraph agent — classifies, searches a knowledge base (agentic RAG), "
@@ -155,6 +165,7 @@ with st.sidebar:
         st.session_state.seen_count = 0
         st.session_state.revealing = False
         st.session_state.draft_text = None
+        st.session_state.decision_shown_for = None
         st.rerun()
 
 
@@ -197,106 +208,132 @@ def get_pending_tool_call(conversation_id: str) -> dict | None:
 
 conversation_id = st.session_state.conversation_id
 
-if conversation_id:
-    all_messages = db.get_messages(runner.conn, conversation_id)
-    seen = st.session_state.seen_count
-    revealing = st.session_state.revealing
+tab_chat, tab_trace = st.tabs(["💬 Chat", "🔍 Trace"])
 
-    for m in all_messages[:seen]:
-        render_message(m)  # already shown on an earlier rerun -- draw instantly
-    for m in all_messages[seen:]:
-        render_message(m, delay=revealing)  # this turn's new lines -- reveal one at a time
-    st.session_state.seen_count = len(all_messages)
+with tab_trace:
+    st.caption("Raw step-by-step execution trace (agents/orchestrator.py's trace entries) "
+               "for any conversation_id -- paste one from the sidebar, or from GET /conversations/{id}.")
+    trace_conversation_id = st.text_input(
+        "conversation_id", value=conversation_id or "", key="trace_conversation_id")
+    if trace_conversation_id:
+        events = db.get_trace_events(runner.conn, trace_conversation_id)
+        if not events:
+            st.info("No trace events found for this conversation_id.")
+        for e in events:
+            label = f"step {e['step_index']} · {e['node']} · {e['event_type']}"
+            if e.get("latency_ms") is not None:
+                label += f" · {e['latency_ms']} ms"
+            with st.expander(label):
+                st.json({k: v for k, v in e.items() if k != "conversation_id"})
 
-    d = get_latest_decision(conversation_id)
-    # A greeting/non-ticket message gets a synthetic auto_respond decision purely so
-    # every response has the same API shape (see agents/orchestrator.py's supervisor)
-    # -- its reply is already one of all_messages (unprefixed, not narration) and its
-    # urgency/action/confidence aren't a real triage outcome, so neither belongs here.
-    is_direct_reply = d.get("rationale") == "direct conversational reply -- not a ticket requiring triage"
+with tab_chat:
+    if conversation_id:
+        all_messages = db.get_messages(runner.conn, conversation_id)
+        seen = st.session_state.seen_count
+        revealing = st.session_state.revealing
 
-    if d.get("urgency") and not is_direct_reply:
-        color = URGENCY_COLORS.get(d["urgency"], "gray")
-        st.caption(f":{color}[{d['urgency'].upper()}]  ·  action: **{d.get('action')}**  "
-                   f"·  confidence {d.get('confidence', 0):.2f}")
+        for m in all_messages[:seen]:
+            render_message(m)  # already shown on an earlier rerun -- draw instantly
+        for m in all_messages[seen:]:
+            render_message(m, delay=revealing)  # this turn's new lines -- reveal one at a time
+        st.session_state.seen_count = len(all_messages)
 
-    already_shown = {m["content"] for m in all_messages}
-    if d.get("draft_reply") and d["draft_reply"] not in already_shown:
-        # auto_respond's draft_reply is never written into the messages table (only
-        # an advisory send_message() reply, or a direct_reply's own answer, is) -- it
-        # lives solely on the decision record, so it has to be rendered separately
-        # from the history loop above. The already_shown check is what keeps a
-        # direct_reply from appearing twice -- its answer IS in all_messages, so this
-        # skips it instead of rendering the same text as a second bubble.
-        if revealing:
-            time.sleep(REVEAL_DELAY_SECONDS)
-        with st.chat_message("assistant"):
-            st.markdown(d["draft_reply"])
-    elif d.get("rationale") and d.get("action") in ("route_to_specialist", "escalate_to_human"):
-        # Neither of these actions has a customer-facing reply -- show why, so the
-        # turn doesn't end in silence after a page of internal handoff lines.
-        if revealing:
-            time.sleep(REVEAL_DELAY_SECONDS)
-        with st.chat_message("assistant"):
-            st.markdown(f"_{d['rationale']}_")
+        d = get_latest_decision(conversation_id)
+        # A greeting/non-ticket message gets a synthetic auto_respond decision purely so
+        # every response has the same API shape (see agents/orchestrator.py's supervisor)
+        # -- its reply is already one of all_messages (unprefixed, not narration) and its
+        # urgency/action/confidence aren't a real triage outcome, so neither belongs here.
+        is_direct_reply = d.get("rationale") == "direct conversational reply -- not a ticket requiring triage"
 
-    st.session_state.revealing = False  # consumed -- the next rerun just redraws history instantly
+        # Only render this decision's summary once per conversation -- see decision_shown_for's
+        # own comment above for why (send_message()/approve/reject rerun this block without
+        # ever producing a NEW decision, so without this guard the same stale rationale/
+        # draft_reply would reappear below every later operator follow-up).
+        if st.session_state.decision_shown_for != conversation_id:
+            if d.get("urgency") and not is_direct_reply:
+                color = URGENCY_COLORS.get(d["urgency"], "gray")
+                st.caption(f":{color}[{d['urgency'].upper()}]  ·  action: **{d.get('action')}**  "
+                           f"·  confidence {d.get('confidence', 0):.2f}")
 
-pending_tool = get_pending_tool_call(conversation_id) if conversation_id else None
+            already_shown = {m["content"] for m in all_messages}
+            if d.get("draft_reply") and d["draft_reply"] not in already_shown:
+                # auto_respond's draft_reply is never written into the messages table (only
+                # an advisory send_message() reply, or a direct_reply's own answer, is) -- it
+                # lives solely on the decision record, so it has to be rendered separately
+                # from the history loop above. The already_shown check is what keeps a
+                # direct_reply from appearing twice -- its answer IS in all_messages, so this
+                # skips it instead of rendering the same text as a second bubble.
+                if revealing:
+                    time.sleep(REVEAL_DELAY_SECONDS)
+                with st.chat_message("assistant"):
+                    st.markdown(d["draft_reply"])
+            elif d.get("rationale") and d.get("action") in ("route_to_specialist", "escalate_to_human"):
+                # Neither of these actions has a customer-facing reply -- show why, so the
+                # turn doesn't end in silence after a page of internal handoff lines.
+                if revealing:
+                    time.sleep(REVEAL_DELAY_SECONDS)
+                with st.chat_message("assistant"):
+                    st.markdown(f"_{d['rationale']}_")
 
-if pending_tool:
-    st.warning(f"Approval needed: **{pending_tool['tool_name']}**({pending_tool['args']})")
-    reason = st.text_input("Reason (optional)", key="approval_reason")
-    col1, col2 = st.columns(2)
-    if col1.button("✅ Approve", use_container_width=True):
-        with st.spinner("Executing..."):
-            run_async(runner.approve(conversation_id, pending_tool["tool_call_id"], reason or None))
-        st.session_state.revealing = True
-        st.rerun()
-    if col2.button("❌ Reject", use_container_width=True):
-        with st.spinner("Rejecting..."):
-            run_async(runner.reject(conversation_id, pending_tool["tool_call_id"], reason or None))
-        st.session_state.revealing = True
-        st.rerun()
-else:
-    if conversation_id is None and not st.session_state.draft_text:
-        # Examples only make sense for starting a new conversation. A click fills
-        # draft_text instead of sending anything -- st.chat_input can't be
-        # pre-filled programmatically (no `value=` the way st.text_input has), so
-        # showing an editable st.text_area below is what lets the user review or
-        # tweak the example before they, themselves, press Send.
-        st.caption("Try an example:")
-        cols = st.columns(len(EXAMPLE_TICKETS))
-        for col, example in zip(cols, EXAMPLE_TICKETS):
-            if col.button(example["label"], use_container_width=True):
-                st.session_state.draft_text = example["text"]
-                st.rerun()
+            st.session_state.decision_shown_for = conversation_id
 
-    prompt = None
-    if st.session_state.draft_text:
-        # Swapped in for st.chat_input while a draft is active -- having both
-        # visible at once would be confusing about which one actually sends.
-        edited = st.text_area("Edit if you'd like, then send:", value=st.session_state.draft_text,
-                               height=120, key="draft_editor")
-        col_send, col_cancel = st.columns([1, 5])
-        if col_send.button("Send ➤", type="primary", use_container_width=True):
-            prompt = edited
-            st.session_state.draft_text = None
-        if col_cancel.button("Cancel"):
-            st.session_state.draft_text = None
+        st.session_state.revealing = False  # consumed -- the next rerun just redraws history instantly
+
+    pending_tool = get_pending_tool_call(conversation_id) if conversation_id else None
+
+    if pending_tool:
+        st.warning(f"Approval needed: **{pending_tool['tool_name']}**({pending_tool['args']})")
+        reason = st.text_input("Reason (optional)", key="approval_reason")
+        col1, col2 = st.columns(2)
+        if col1.button("✅ Approve", use_container_width=True):
+            with st.spinner("Executing..."):
+                run_async(runner.approve(conversation_id, pending_tool["tool_call_id"], reason or None))
+            st.session_state.revealing = True
+            st.rerun()
+        if col2.button("❌ Reject", use_container_width=True):
+            with st.spinner("Rejecting..."):
+                run_async(runner.reject(conversation_id, pending_tool["tool_call_id"], reason or None))
+            st.session_state.revealing = True
             st.rerun()
     else:
-        prompt = st.chat_input("Describe the issue, or continue the conversation...")
+        if conversation_id is None and not st.session_state.draft_text:
+            # Examples only make sense for starting a new conversation. A click fills
+            # draft_text instead of sending anything -- st.chat_input can't be
+            # pre-filled programmatically (no `value=` the way st.text_input has), so
+            # showing an editable st.text_area below is what lets the user review or
+            # tweak the example before they, themselves, press Send.
+            st.caption("Try an example:")
+            cols = st.columns(len(EXAMPLE_TICKETS))
+            for col, example in zip(cols, EXAMPLE_TICKETS):
+                if col.button(example["label"], use_container_width=True):
+                    st.session_state.draft_text = example["text"]
+                    st.rerun()
 
-    if prompt:
-        with st.spinner("Thinking..."):
-            if conversation_id is None:
-                conversation_id = f"c_{uuid.uuid4().hex[:8]}"
-                metadata = {"plan": plan, "tenure_months": int(tenure_months), "prior_tickets": int(prior_tickets)}
-                run_async(runner.ingest_ticket(
-                    conversation_id, [{"role": "customer", "content": prompt}], metadata))
-                st.session_state.conversation_id = conversation_id
-            else:
-                run_async(runner.send_message(conversation_id, prompt))
-        st.session_state.revealing = True
-        st.rerun()
+        prompt = None
+        if st.session_state.draft_text:
+            # Swapped in for st.chat_input while a draft is active -- having both
+            # visible at once would be confusing about which one actually sends.
+            edited = st.text_area("Edit if you'd like, then send:", value=st.session_state.draft_text,
+                                   height=120, key="draft_editor")
+            col_send, col_cancel = st.columns([1, 5])
+            if col_send.button("Send ➤", type="primary", use_container_width=True):
+                prompt = edited
+                st.session_state.draft_text = None
+            if col_cancel.button("Cancel"):
+                st.session_state.draft_text = None
+                st.rerun()
+        else:
+            prompt = st.chat_input("Describe the issue, or continue the conversation...")
+
+        if prompt:
+            with st.spinner("Thinking..."):
+                if conversation_id is None:
+                    conversation_id = f"c_{uuid.uuid4().hex[:8]}"
+                    metadata = {"plan": plan, "tenure_months": int(tenure_months), "prior_tickets": int(prior_tickets)}
+                    run_async(runner.ingest_ticket(
+                        conversation_id, [{"role": "customer", "content": prompt}], metadata))
+                    st.session_state.conversation_id = conversation_id
+                else:
+                    run_async(runner.send_message(conversation_id, prompt))
+            st.session_state.revealing = True
+            st.rerun()
