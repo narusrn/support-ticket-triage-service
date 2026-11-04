@@ -153,11 +153,11 @@ st.caption("LangGraph agent — classifies, searches a knowledge base (agentic R
            "side-effecting actions need your approval below.")
 
 with st.sidebar:
-    st.subheader("New ticket")
-    st.caption("Used for the first message of a new conversation only.")
-    plan = st.selectbox("Plan", ["free", "pro", "enterprise"])
-    tenure_months = st.number_input("Tenure (months)", min_value=0, value=0)
-    prior_tickets = st.number_input("Prior tickets", min_value=0, value=0)
+    # No plan/tenure/prior-tickets form here on purpose -- agents.runner.Runner.ingest_ticket()
+    # already infers those signals from the thread text itself when no customer_metadata is
+    # given (see its own comment), and every example ticket's text already states them
+    # (e.g. "Pro plan, 5 months, daily active user") -- a form here with its own defaults
+    # would contradict whatever the thread text says and never let that fallback fire.
     if st.session_state.conversation_id:
         st.caption(f"conversation_id: `{st.session_state.conversation_id}`")
     if st.button("Start new conversation"):
@@ -329,9 +329,11 @@ with tab_chat:
             with st.spinner("Thinking..."):
                 if conversation_id is None:
                     conversation_id = f"c_{uuid.uuid4().hex[:8]}"
-                    metadata = {"plan": plan, "tenure_months": int(tenure_months), "prior_tickets": int(prior_tickets)}
+                    # {} on purpose -- see the sidebar's own comment on why: this lets
+                    # Runner.ingest_ticket() infer plan/tenure/prior-tickets from the
+                    # thread text itself instead of contradicting it with a form default.
                     run_async(runner.ingest_ticket(
-                        conversation_id, [{"role": "customer", "content": prompt}], metadata))
+                        conversation_id, [{"role": "customer", "content": prompt}], {}))
                     st.session_state.conversation_id = conversation_id
                 else:
                     run_async(runner.send_message(conversation_id, prompt))
